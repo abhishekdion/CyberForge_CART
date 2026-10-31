@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cyberforge-cart"
+version = "0.1.0"
+description = "CART - controlled, multi-agent, scope-locked assessment engine for organiser-designated labs (CyberForge 2026)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "CyberForge CART team" }]
+# Core runtime is deterministic Python + SQLite. LLM support is OPTIONAL by design
+# (spec design principle 9 / section 11 "Model dependency").
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.4"]
+# Only needed if the team later decides to add a local LLM for optional
+# triage/summary assistance. Never required for core operation.
+llm-local = ["ollama"]
+
+[project.scripts]
+cart = "cart.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100

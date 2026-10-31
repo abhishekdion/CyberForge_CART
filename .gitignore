@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# CART run artifacts
+data/
+artifacts/
+*.db
+*.db-wal
+*.db-shm
+
+# Graphify per-developer code graph (never commit; rebuild locally)
+graphify-out/
+
+# Env / secrets
+.env
+.venv*/

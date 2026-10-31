@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/glm-5.3-flash-free",
+  "default_agent": "build",
+  "instructions": [
+    "docs/data-contracts.md",
+    "docs/safety.md"
+  ],
+  "permissions": [
+    { "action": "shell", "resource": "git push*", "effect": "ask" },
+    { "action": "shell", "resource": "pip install*", "effect": "ask" },
+    { "action": "shell", "resource": "*nmap*", "effect": "ask", "description": "Active scanning tools: confirm lab target first" },
+    { "action": "shell", "resource": "*masscan*", "effect": "deny" },
+    { "action": "shell", "resource": "*zap*", "effect": "ask" },
+    { "action": "shell", "resource": "*analyzeHeadless*", "effect": "ask" }
+  ],
+  "mcp": {
+    "servers": {
+      "context7": {
+        "type": "remote",
+        "url": "https://mcp.context7.com/mcp"
+      }
+    }
+  },
+  "experimental": {
+    "todo": true
+  }
+}
