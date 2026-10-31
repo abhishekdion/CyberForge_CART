@@ -1,0 +1,72 @@
+{
+  "run_metadata": {
+    "run_id": "run_bee3fb027476",
+    "status": "partial",
+    "tier": "breach",
+    "started_at": "2026-10-31T16:57:23+00:00",
+    "completed_at": "2026-10-31T16:57:24+00:00",
+    "scope_version": "scope_b97c624b550a"
+  },
+  "executive_summary": "Assessment run run_bee3fb027476 (PARTIAL) discovered 1 asset(s) and 3 open service(s). Identified 0 finding(s) with 0 confirmed. Scope safety enforced 0 out-of-scope denials with 0 safety leaks.",
+  "scope_manifest": {
+    "version": "scope_b97c624b550a",
+    "prefixes": [
+      "127.0.0.1/32"
+    ],
+    "hosts": [],
+    "exclusions": [],
+    "binary_hashes": {},
+    "created_by": "organiser-cli",
+    "locked_at": "2026-10-31T16:57:22+00:00"
+  },
+  "inventory": [
+    {
+      "asset_id": "asset_d51f07413e0e",
+      "type": "host",
+      "canonical_key": "127.0.0.1",
+      "first_seen": "2026-10-31T16:57:23+00:00",
+      "last_seen": "2026-10-31T16:57:24+00:00",
+      "services": [
+        {
+          "service_id": "svc_f534abbd7db5",
+          "protocol": "tcp",
+          "port": 135,
+          "name": "msrpc",
+          "version": "",
+          "state": "open"
+        },
+        {
+          "service_id": "svc_799ef84b8940",
+          "protocol": "tcp",
+          "port": 445,
+          "name": "microsoft-ds",
+          "version": "",
+          "state": "open"
+        },
+        {
+          "service_id": "svc_e3997ac82bf2",
+          "protocol": "tcp",
+          "port": 8080,
+          "name": "http-proxy",
+          "version": "",
+          "state": "open"
+        }
+      ]
+    }
+  ],
+  "findings": [],
+  "attack_paths": [],
+  "metrics": {
+    "scope_safety_out_of_bounds_probes": 0,
+    "scope_decisions_allowed": 8,
+    "scope_decisions_denied": 0,
+    "total_assets_discovered": 1,
+    "total_services_discovered": 3,
+    "total_findings": 0,
+    "confirmed_findings": 0,
+    "verification_rate_pct": 100.0,
+    "false_alarm_rate_pct": 0.0,
+    "runtime_seconds": 1.0,
+    "autonomy_interventions": 0
+  }
+}

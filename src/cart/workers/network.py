@@ -42,15 +42,17 @@ _MIN_NMAP_MAJOR = 7
 # Common TCP ports catalog for native socket fallback
 _COMMON_PORTS: list[int] = [
     21, 22, 23, 25, 53, 80, 88, 110, 135, 139, 143, 443, 445, 993, 995,
-    1433, 1521, 3306, 3389, 5432, 5900, 6379, 8000, 8080, 8443, 8888, 9000, 27017,
+    1433, 1521, 3000, 3306, 3389, 5432, 5900, 6379, 8000, 8080, 8443, 8888, 9000, 27017,
 ]
 
 _PORT_SERVICE_MAP: dict[int, str] = {
     21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "domain",
     80: "http", 88: "kerberos", 110: "pop3", 135: "msrpc", 139: "netbios-ssn",
     143: "imap", 443: "https", 445: "microsoft-ds", 993: "imaps", 995: "pop3s",
+    3000: "http",
     1433: "ms-sql-s", 1521: "oracle", 3306: "mysql", 3389: "ms-wbt-server",
-    5432: "postgresql", 5900: "vnc", 6379: "redis", 8000: "http", 8080: "http-proxy",
+    5432: "postgresql", 5900: "vnc", 6379: "redis",
+    8000: "http", 8080: "http-proxy",
     8443: "https-alt", 8888: "http", 9000: "http", 27017: "mongodb",
 }
 
@@ -330,16 +332,28 @@ def _scan_native_sockets(
 # Worker
 # ---------------------------------------------------------------------------
 
-_WEB_PORTS = {80, 443, 8000, 8080, 8443, 8888}
+_WEB_PORTS = {80, 443, 3000, 8000, 8080, 8443, 8888}
 
 
 class NetworkWorker:
     """In-scope live host / port / service discovery."""
 
-    def __init__(self, conn: sqlite3.Connection, gate: PolicyGate, run_id: str):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        gate: PolicyGate,
+        run_id: str,
+        ports: list[int] | None = None,
+    ):
+        if ports is not None and (
+            not ports
+            or any(type(port) is not int or port < 1 or port > 65535 for port in ports)
+        ):
+            raise ValueError("ports must contain TCP port numbers in the range 1-65535")
         self.conn = conn
         self.gate = gate
         self.run_id = run_id
+        self.ports = list(dict.fromkeys(ports)) if ports is not None else None
         self._nmap = _check_nmap()
 
     def _run_native_scan(
@@ -363,7 +377,11 @@ class NetworkWorker:
         )
         deadline = time.monotonic() + timeout_s
         assets, services = _scan_native_sockets(
-            task.target_id, self.gate, self.run_id, deadline=deadline
+            task.target_id,
+            self.gate,
+            self.run_id,
+            ports=self.ports,
+            deadline=deadline,
         )
         event.finished_at = utc_now()
         event.exit_status = "0"
@@ -405,6 +423,13 @@ class NetworkWorker:
                 with tempfile.TemporaryDirectory() as tmpdir:
                     xml_path = Path(tmpdir) / "scan.xml"
                     nmap_args = [
+                        "-p",
+                        ",".join(
+                            str(port)
+                            for port in (
+                                self.ports if self.ports is not None else _COMMON_PORTS
+                            )
+                        ),
                         "-sV",            # version detection
                         "--open",         # only open ports
                         "-T4",            # aggressive timing (lab environment)

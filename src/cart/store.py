@@ -8,7 +8,103 @@ no graph database is needed for the first release.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
+
+_LOCKS_GUARD = threading.Lock()
+_DATABASE_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_STATEMENTS = {"ALTER", "CREATE", "DELETE", "DROP", "INSERT", "PRAGMA", "REINDEX", "REPLACE", "UPDATE", "VACUUM"}
+
+
+def _database_write_lock(db_path: str) -> threading.Lock:
+    key = str(Path(db_path).resolve())
+    with _LOCKS_GUARD:
+        lock = _DATABASE_WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _DATABASE_WRITE_LOCKS[key] = lock
+        return lock
+
+
+class SerializedSQLiteConnection(sqlite3.Connection):
+    """Serialize write transactions across connections to the same database."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        db_row = super().execute("PRAGMA database_list").fetchone()
+        db_path = db_row[2] if db_row else ""
+        self._database_write_lock = (
+            _database_write_lock(db_path) if db_path else threading.Lock()
+        )
+        self._holds_database_write_lock = False
+
+    def _acquire_for_write(self) -> None:
+        if not self._holds_database_write_lock:
+            self._database_write_lock.acquire()
+            self._holds_database_write_lock = True
+
+    def _release_if_idle(self) -> None:
+        if self._holds_database_write_lock and not self.in_transaction:
+            self._holds_database_write_lock = False
+            self._database_write_lock.release()
+
+    @staticmethod
+    def _is_write_statement(sql: str) -> bool:
+        parts = sql.lstrip().split(None, 1)
+        return bool(parts and parts[0].upper() in _WRITE_STATEMENTS)
+
+    def execute(self, sql, parameters=(), /):
+        if self._is_write_statement(sql):
+            self._acquire_for_write()
+        try:
+            cursor = super().execute(sql, parameters)
+        except BaseException:
+            self._release_if_idle()
+            raise
+        self._release_if_idle()
+        return cursor
+
+    def executemany(self, sql, seq_of_parameters, /):
+        if self._is_write_statement(sql):
+            self._acquire_for_write()
+        try:
+            cursor = super().executemany(sql, seq_of_parameters)
+        except BaseException:
+            self._release_if_idle()
+            raise
+        self._release_if_idle()
+        return cursor
+
+    def executescript(self, sql_script, /):
+        self._acquire_for_write()
+        try:
+            cursor = super().executescript(sql_script)
+        except BaseException:
+            self._release_if_idle()
+            raise
+        self._release_if_idle()
+        return cursor
+
+    def commit(self):
+        try:
+            return super().commit()
+        finally:
+            self._release_if_idle()
+
+    def rollback(self):
+        try:
+            return super().rollback()
+        finally:
+            self._release_if_idle()
+
+    def close(self):
+        try:
+            return super().close()
+        finally:
+            if self._holds_database_write_lock:
+                self._holds_database_write_lock = False
+                self._database_write_lock.release()
+
 
 SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -145,8 +241,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_dedupe ON tasks(dedupe_key) WHERE de
 """
 
 
-def connect(db_path: str | Path, check_same_thread: bool = False) -> sqlite3.Connection:
+def connect(
+    db_path: str | Path,
+    check_same_thread: bool = False,
+    *,
+    initialize_schema: bool = True,
+) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
-    conn.executescript(SCHEMA)
+    conn = sqlite3.connect(
+        db_path,
+        timeout=30,
+        check_same_thread=check_same_thread,
+        factory=SerializedSQLiteConnection,
+    )
+    conn.execute("PRAGMA busy_timeout = 30000")
+    if initialize_schema:
+        conn.executescript(SCHEMA)
     return conn

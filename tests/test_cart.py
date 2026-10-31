@@ -1,15 +1,22 @@
 """Comprehensive test suite for CyberForge CART engine (stdlib unittest)."""
 
+import argparse
 import hashlib
+import http.server
 import json
 import tempfile
+import threading
 import unittest
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
+from urllib.request import Request
 
 from cart.advisor import RemediationAdvisor
 from cart.attackpath import AttackPathBuilder
 from cart.budget import BudgetExceeded, RunBudget, TaskRetryBudget
+from cart.cli import _parse_ports
 from cart.models import (
     FindingStatus,
     ScopeDecision,
@@ -20,7 +27,7 @@ from cart.models import (
 )
 from cart.orchestrator import Orchestrator
 from cart.report import ReportGenerator
-from cart.scope import PolicyGate, ScopeNotLockedError
+from cart.scope import PolicyGate, ScopeDecisionResult, ScopeNotLockedError
 from cart.store import connect
 from cart.tracing import AgentTracer, Span
 from cart.verify import VerificationService
@@ -31,6 +38,7 @@ from cart.workers.binary import (
 from cart.workers.binary import (
     scan_flags as bin_scan_flags,
 )
+from cart.workers.network import NetworkWorker
 from cart.workers.web import (
     WebWorker,
     extract_html_comments,
@@ -97,6 +105,26 @@ class TestPolicyGate(unittest.TestCase):
             self.assertEqual(row[0], "192.168.1.10")
             self.assertEqual(row[1], "allow")
             conn.close()
+
+    def test_concurrent_audit_writes_use_independent_connections(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = connect(Path(tmpdir) / "concurrent_audit.db")
+            gate = PolicyGate(self.manifest)
+            gate.bind_store(conn)
+            try:
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(
+                        pool.map(
+                            lambda n: gate.gate(f"192.168.1.{n}", run_id="parallel"),
+                            range(1, 25),
+                        )
+                    )
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM scope_decisions_log WHERE run_id='parallel'"
+                ).fetchone()[0]
+                self.assertEqual(count, 24)
+            finally:
+                conn.close()
 
 
 class TestBudgetAndOrchestrator(unittest.TestCase):
@@ -421,6 +449,100 @@ class TestWebWorkerDiscoveredPort(unittest.TestCase):
         ).fetchone()
         self.assertEqual(decision[0], "allow")
 
+    def test_out_of_scope_redirect_is_denied_before_following(self):
+        hits: list[str] = []
+
+        class RedirectHandler(http.server.BaseHTTPRequestHandler):
+            redirect_url = ""
+
+            def do_GET(self):
+                hits.append(self.path)
+                self.send_response(302)
+                self.send_header("Location", self.redirect_url)
+                self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), RedirectHandler
+        )
+        redirect_url = f"http://127.0.0.1:{server.server_port}/denied"
+        RedirectHandler.redirect_url = redirect_url
+        start_url = f"http://127.0.0.1:{server.server_port}/start"
+
+        class DenyingRedirectGate:
+            def __init__(self):
+                self.targets: list[str] = []
+
+            def gate(self, target, run_id, is_url=False):
+                self.targets.append(target)
+                decision = (
+                    ScopeDecision.DENY
+                    if target == redirect_url
+                    else ScopeDecision.ALLOW
+                )
+                return ScopeDecisionResult(decision, "test redirect policy", target)
+
+        gate = DenyingRedirectGate()
+        self.worker.gate = gate
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                self.worker._open_scoped(Request(start_url), timeout=2)
+            raised.exception.close()
+            self.assertIn("scope denied redirect", str(raised.exception))
+            self.assertEqual(hits, ["/start"])
+            self.assertEqual(gate.targets, [redirect_url])
+        finally:
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=2)
+
+
+class TestNetworkPortRestriction(unittest.TestCase):
+    def test_parse_ports_deduplicates_and_rejects_invalid_values(self):
+        self.assertEqual(_parse_ports("8080, 443,8080"), [8080, 443])
+        for value in ("0", "65536", "abc", "80,,443"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                _parse_ports(value)
+
+    def test_network_worker_passes_port_allowlist_to_native_scan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conn = connect(Path(tmpdir) / "ports.db")
+            try:
+                conn.execute(
+                    "INSERT INTO runs (run_id, status, tier) VALUES ('run_ports', 'running', 'breach')"
+                )
+                conn.commit()
+                task = Task(
+                    task_id="task_ports",
+                    task_type="host_discovery",
+                    owner="network",
+                    target_id="127.0.0.1/32",
+                    status=TaskStatus.READY,
+                )
+                Orchestrator(conn, "run_ports").create_task(task)
+                gate = PolicyGate(
+                    ScopeManifest(
+                        scope_version="ports_v1",
+                        included_prefixes=["127.0.0.1/32"],
+                        locked_at=utc_now(),
+                    )
+                )
+                gate.bind_store(conn)
+                with patch("cart.workers.network._check_nmap", return_value=None):
+                    worker = NetworkWorker(conn, gate, "run_ports", ports=[8080])
+                with patch(
+                    "cart.workers.network._scan_native_sockets",
+                    return_value=([], []),
+                ) as scan:
+                    worker._run_native_scan(task)
+                self.assertEqual(scan.call_args.kwargs["ports"], [8080])
+            finally:
+                conn.close()
+
 
 class TestPolicyGateDynamicBinary(unittest.TestCase):
     """Scope safety for the web→binary hand-off registrations."""
@@ -711,6 +833,10 @@ class TestUIDashboard(unittest.TestCase):
             gdata = json.loads(handler.wfile.getvalue())
             self.assertIn("nodes", gdata)
             self.assertIn("edges", gdata)
+            self.assertEqual(
+                gdata["nodes"],
+                [{"id": "a_ui", "label": "10.0.0.1", "x": 90, "y": 75, "type": "asset"}],
+            )
 
             # Test _handle_flags
             handler.wfile = io.BytesIO()

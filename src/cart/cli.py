@@ -15,8 +15,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import queue
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 # Reconfigure stdout/stderr for Windows consoles with cp1252 default
@@ -49,6 +51,17 @@ from .workers.network import NetworkWorker
 from .workers.web import WebWorker
 
 DEFAULT_DB = "cart.db"
+
+
+def _parse_ports(value: str) -> list[int]:
+    """Parse a comma-separated explicit TCP port allowlist."""
+    try:
+        ports = [int(part.strip()) for part in value.split(",")]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("ports must be comma-separated integers") from exc
+    if not ports or any(port < 1 or port > 65535 for port in ports):
+        raise argparse.ArgumentTypeError("ports must be in the range 1-65535")
+    return list(dict.fromkeys(ports))
 
 
 def _get_db(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
@@ -213,8 +226,6 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Optional live background UI dashboard
     if getattr(args, "ui", False):
-        import threading
-
         from .ui import run_dashboard_server
         def _run_ui():
             srv = run_dashboard_server(db_path=args.db, host="127.0.0.1", port=8080)
@@ -234,10 +245,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         total_time_budget_s=args.timeout,
     )
 
-    # Initialize Workers
-    net_worker = NetworkWorker(conn=conn, gate=gate, run_id=run_id)
-    web_worker = WebWorker(conn=conn, gate=gate, run_id=run_id)
-    bin_worker = BinaryWorker(conn=conn, gate=gate, run_id=run_id)
+    worker_contexts: queue.Queue[tuple[NetworkWorker, WebWorker, BinaryWorker]] = queue.Queue()
+    worker_connections: list[sqlite3.Connection] = []
+    for _ in range(max(1, args.concurrency)):
+        worker_conn = _get_db(args.db)
+        worker_connections.append(worker_conn)
+        worker_contexts.put(
+            (
+                NetworkWorker(conn=worker_conn, gate=gate, run_id=run_id, ports=args.ports),
+                WebWorker(conn=worker_conn, gate=gate, run_id=run_id),
+                BinaryWorker(conn=worker_conn, gate=gate, run_id=run_id),
+            )
+        )
+    worker_local = threading.local()
 
     # Seed initial tasks from scope manifest
     for prefix in manifest.included_prefixes:
@@ -268,6 +288,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Unified task dispatcher
     def dispatch_worker(task: Task) -> dict:
+        workers = getattr(worker_local, "workers", None)
+        if workers is None:
+            workers = worker_contexts.get_nowait()
+            worker_local.workers = workers
+        net_worker, web_worker, bin_worker = workers
         print(f"[*] Executing task {task.task_id} [{task.task_type}] on target {task.target_id}")
         if task.owner == "network":
             return net_worker.run(task)
@@ -302,7 +327,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # Run scheduling loop
     print("[*] Dispatching tasks across orchestrator loop...")
-    orchestrator.run_loop(worker_fn=dispatch_worker, on_result=handle_result)
+    try:
+        orchestrator.run_loop(worker_fn=dispatch_worker, on_result=handle_result)
+    finally:
+        for worker_conn in worker_connections:
+            worker_conn.close()
 
     # Verification Phase
     print("\n[*] Running Verification Service on candidate findings...")
@@ -453,6 +482,12 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--concurrency", type=int, default=4, help="Max concurrent workers (default 4)")
     p_run.add_argument("--timeout", type=int, default=1200, help="Run budget timeout in seconds (default 1200 / 20 min)")
     p_run.add_argument("--report-dir", default="reports", help="Directory for generated reports")
+    p_run.add_argument(
+        "--ports",
+        type=_parse_ports,
+        metavar="PORT[,PORT...]",
+        help="Restrict TCP discovery to these ports (e.g. 8080); default is the common-port list",
+    )
     p_run.add_argument("--ui", action="store_true", help="Launch live UI dashboard in background during assessment")
 
     # cart status

@@ -28,7 +28,8 @@ Properties:
   unknown binary file → all DENY with a recorded reason.
 - **Exclusions win** over included prefixes.
 - **Redirect re-check.** Every web redirect/linked destination is re-validated;
-  out-of-scope redirects are blocked and logged, never followed.
+  out-of-scope redirects are rejected before urllib sends a request to the
+  redirected destination and are logged by the PolicyGate.
 - **Registered binaries only.** The binary worker reads only hash-registered
   organiser files; hash mismatch = reject + record. One auditable exception:
   files **downloaded by the Web Worker from an already-gate-allowed in-scope
@@ -52,8 +53,10 @@ Properties:
   Use it only after organiser approval and only as an isolated instance with
   an explicitly locked scope. Do not assess public or internet-accessible
   instances; record the scope decision and lab-side evidence for validation.
-  The local development recipe in `labs/juice-shop/README.md` binds the app to
-  loopback and uses an internal Docker network.
+  The local development recipe in `labs/juice-shop/README.md` uses an internal
+  Docker network and runs CART in the app container's network namespace. Its
+  CART example restricts discovery to port 3000, so no host port is published
+  and other host services are not probed.
 - Masscan is banned in the repo config until benchmarks + organiser limits
   justify it.
 - Static analysis only for binaries by default (no dynamic execution of

@@ -10,10 +10,12 @@ from __future__ import annotations
 import ipaddress
 import socket
 import sqlite3
+import threading
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from .models import ScopeDecision, ScopeManifest, new_id, utc_now
+from .store import connect
 
 
 class ScopeNotLockedError(RuntimeError):
@@ -45,6 +47,8 @@ class PolicyGate:
             ipaddress.ip_network(e, strict=False) for e in manifest.exclusions
         ]
         self._conn: sqlite3.Connection | None = None
+        self._db_path: str | None = None
+        self._record_lock = threading.Lock()
         # In-run downloaded copies of in-scope content (web→binary hand-off).
         # NEVER writes to the locked manifest; targets themselves never grow.
         self._dynamic_binaries: dict[str, str] = {}  # path -> sha256
@@ -52,6 +56,8 @@ class PolicyGate:
     def bind_store(self, conn: sqlite3.Connection) -> None:
         """Attach a live DB connection so record_decision can persist decisions."""
         self._conn = conn
+        db_row = conn.execute("PRAGMA database_list").fetchone()
+        self._db_path = db_row[2] if db_row and db_row[2] else None
 
     # ------------------------------------------------------------------
     # Core IP/network checks
@@ -198,22 +204,30 @@ class PolicyGate:
         if self._conn is None:
             return  # store not bound yet (e.g. during preflight / unit tests)
         event_id = new_id("sdl")
-        self._conn.execute(
-            """
+        values = (
+            event_id,
+            run_id,
+            requested,
+            result.decision.value,
+            result.reason,
+            utc_now(),
+        )
+        query = """
             INSERT INTO scope_decisions_log
                 (event_id, run_id, requested_target, decision, reason, at)
             VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                event_id,
-                run_id,
-                requested,
-                result.decision.value,
-                result.reason,
-                utc_now(),
-            ),
-        )
-        self._conn.commit()
+        """
+        if self._db_path is not None:
+            audit_conn = connect(self._db_path, initialize_schema=False)
+            try:
+                audit_conn.execute(query, values)
+                audit_conn.commit()
+            finally:
+                audit_conn.close()
+        else:
+            with self._record_lock:
+                self._conn.execute(query, values)
+                self._conn.commit()
 
     # ------------------------------------------------------------------
     # Convenience: check + record in one call

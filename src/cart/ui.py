@@ -433,7 +433,7 @@ function renderFindings(findings) {
 function renderGraph(graphData) {
   const svg = document.getElementById('attack-graph-svg');
   if (!graphData.nodes || !graphData.nodes.length) {
-    svg.innerHTML = '<text x="350" y="150" fill="#6b7280" text-anchor="middle" font-size="14">No attack paths generated yet. Run an assessment.</text>';
+    svg.innerHTML = '<text x="350" y="150" fill="#6b7280" text-anchor="middle" font-size="14">No assets discovered yet. Run an assessment.</text>';
     return;
   }
 
@@ -444,6 +444,9 @@ function renderGraph(graphData) {
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#ef4444" />
     </marker>
   </defs>`;
+  if (!edges.length) {
+    html += `<text x="350" y="24" fill="#9ca3af" text-anchor="middle" font-size="12">Discovered assets — no evidence-backed attack paths identified</text>`;
+  }
 
   // Draw Edges
   edges.forEach(e => {
@@ -793,7 +796,11 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_graph(self) -> None:
         conn = connect(self.db_path, check_same_thread=False)
-        builder = AttackPathBuilder(conn, "current")
+        latest_run = conn.execute(
+            "SELECT run_id FROM runs ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        run_id = latest_run[0] if latest_run else ""
+        builder = AttackPathBuilder(conn, run_id)
         paths = builder.build()
 
         nodes_dict: dict[str, dict[str, Any]] = {}
@@ -802,7 +809,21 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         x_start = 80
         y_center = 150
 
-        asset_names = dict(conn.execute("SELECT asset_id, canonical_key FROM assets").fetchall())
+        asset_rows = conn.execute(
+            "SELECT asset_id, canonical_key FROM assets WHERE run_id=? ORDER BY canonical_key",
+            (run_id,),
+        ).fetchall()
+        asset_names = dict(asset_rows)
+        current_asset_ids = set(asset_names)
+        paths = [
+            path
+            for path in paths
+            if all(
+                edge.source_id in current_asset_ids
+                and edge.target_id in current_asset_ids
+                for edge in path.edges
+            )
+        ]
 
         for p_idx, path in enumerate(paths):
             for step_idx, e in enumerate(path.edges):
@@ -832,6 +853,18 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     "technique": e.relationship_type,
                     "confidence": e.confidence_label,
                 })
+
+        for asset_id, canonical_key in asset_rows:
+            if asset_id in nodes_dict:
+                continue
+            index = len(nodes_dict)
+            nodes_dict[asset_id] = {
+                "id": asset_id,
+                "label": canonical_key,
+                "x": 90 + (index % 4) * 170,
+                "y": 75 + ((index // 4) % 3) * 85,
+                "type": "asset",
+            }
 
         conn.close()
         self._send_json({

@@ -54,9 +54,12 @@ stdlib non-blocking TCP socket scan (zero external dependencies) if nmap is
 missing or fails at runtime. Output normalises to canonical asset/service
 records written to the shared store. It raises follow-up tasks; it does not
 decide to attack anything. The Web Worker uses the discovered service port
-(including 8080 for a local Juice Shop instance) instead of assuming every web
+(including 3000 for a local Juice Shop container) instead of assuming every web
 service listens on port 80 or 443. Every HTTP request remains subject to the
-locked-scope gate.
+locked-scope gate, and redirects are rejected before following when the
+destination is out of scope. An optional `cart run --ports` allowlist restricts
+the network worker's TCP discovery; without it, both scanner backends use the
+same common-port catalog.
 
 ### Phase E — Parallel specialist assessment
 The orchestrator schedules independent work simultaneously: Web Worker tasks

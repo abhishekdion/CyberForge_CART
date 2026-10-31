@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 from collections import deque
 from pathlib import Path
+from typing import Any
 
 from ..models import (
     Evidence,
@@ -104,6 +105,31 @@ class _LinkParser(html.parser.HTMLParser):
             self._current_form = None
 
 
+class _ScopeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects before urllib makes a request to the new destination."""
+
+    def __init__(self, gate: PolicyGate, run_id: str):
+        super().__init__()
+        self.gate = gate
+        self.run_id = run_id
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        result = self.gate.gate(newurl, self.run_id, is_url=True)
+        if result.decision is ScopeDecision.DENY:
+            raise urllib.error.HTTPError(
+                newurl, code, f"scope denied redirect: {result.reason}", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
@@ -172,6 +198,14 @@ class WebWorker:
         self.binary_cache_dir = Path(binary_cache_dir)
         self.max_binary_bytes = max_binary_bytes  # explicit download cap
 
+    def _open_scoped(
+        self, request: urllib.request.Request, timeout: float
+    ) -> Any:
+        opener = urllib.request.build_opener(
+            _ScopeRedirectHandler(self.gate, self.run_id)
+        )
+        return opener.open(request, timeout=timeout)
+
     def run(self, task: Task) -> dict:
         """Crawl the web service identified by task.target_id (asset_id).
 
@@ -187,7 +221,7 @@ class WebWorker:
         ip = row[0]
 
         # Prefer a web port discovered and stored by NetworkWorker. This also
-        # supports local lab apps exposed on non-privileged ports such as 8080.
+        # supports local lab apps exposed on non-default ports such as 3000.
         base_url = self._detect_base_url(ip, task.target_id)
 
         # SCOPE GATE on base URL before crawl starts
@@ -237,7 +271,7 @@ class WebWorker:
                 url,
                 headers={"User-Agent": "CART-scanner/0.1 (controlled assessment)"},
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with self._open_scoped(req, timeout=10) as resp:
                 final_url = resp.url
                 if final_url != url:
                     redirect_gate = self.gate.gate(final_url, self.run_id, is_url=True)
@@ -380,11 +414,12 @@ class WebWorker:
                 "SELECT protocol, port FROM services "
                 "WHERE asset_id=? AND state='open' ORDER BY "
                 "CASE port WHEN 443 THEN 0 WHEN 8443 THEN 1 WHEN 80 THEN 2 "
-                "WHEN 8080 THEN 3 WHEN 8000 THEN 4 WHEN 8888 THEN 5 ELSE 6 END, port",
+                "WHEN 8080 THEN 3 WHEN 3000 THEN 4 WHEN 8000 THEN 5 "
+                "WHEN 8888 THEN 6 ELSE 7 END, port",
                 (asset_id,),
             ).fetchall()
             for protocol, port in rows:
-                if port not in {80, 443, 8000, 8080, 8443, 8888}:
+                if port not in {80, 443, 3000, 8000, 8080, 8443, 8888}:
                     continue
                 scheme = "https" if port in {443, 8443} or protocol.lower() == "https" else "http"
                 default_port = 443 if scheme == "https" else 80
@@ -438,7 +473,7 @@ class WebWorker:
                     url,
                     headers={"User-Agent": "CART-scanner/0.1 (controlled assessment)"},
                 )
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with self._open_scoped(req, timeout=10) as resp:
                     # Check redirect destination
                     final_url = resp.url
                     if final_url != url:
