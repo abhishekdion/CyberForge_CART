@@ -186,8 +186,9 @@ class WebWorker:
             raise ValueError(f"Asset {task.target_id} not found in store")
         ip = row[0]
 
-        # Determine protocol by probing 443 then 80
-        base_url = self._detect_base_url(ip)
+        # Prefer a web port discovered and stored by NetworkWorker. This also
+        # supports local lab apps exposed on non-privileged ports such as 8080.
+        base_url = self._detect_base_url(ip, task.target_id)
 
         # SCOPE GATE on base URL before crawl starts
         gate_result = self.gate.gate(base_url, self.run_id, is_url=True)
@@ -367,16 +368,30 @@ class WebWorker:
             ).fetchone()
             return row[0] if row else asset.asset_id
 
-    def _detect_base_url(self, ip: str) -> str:
-        for scheme, port in (("https", 443), ("http", 80)):
-            url = f"{scheme}://{ip}:{port}/"
-            try:
-                req = urllib.request.Request(url, method="HEAD")
-                urllib.request.urlopen(req, timeout=5)
-                return url
-            except Exception:  # noqa: S112 BLE001
-                continue
-        return f"http://{ip}/"  # fallback
+    def _detect_base_url(self, ip: str, asset_id: str | None = None) -> str:
+        """Build a base URL from discovered web services, without probing.
+
+        NetworkWorker has already recorded open services. Using those records
+        avoids guessing ports and ensures the first HTTP request is made only
+        after the caller applies the normal URL scope gate.
+        """
+        if asset_id is not None:
+            rows = self.conn.execute(
+                "SELECT protocol, port FROM services "
+                "WHERE asset_id=? AND state='open' ORDER BY "
+                "CASE port WHEN 443 THEN 0 WHEN 8443 THEN 1 WHEN 80 THEN 2 "
+                "WHEN 8080 THEN 3 WHEN 8000 THEN 4 WHEN 8888 THEN 5 ELSE 6 END, port",
+                (asset_id,),
+            ).fetchall()
+            for protocol, port in rows:
+                if port not in {80, 443, 8000, 8080, 8443, 8888}:
+                    continue
+                scheme = "https" if port in {443, 8443} or protocol.lower() == "https" else "http"
+                default_port = 443 if scheme == "https" else 80
+                port_part = "" if port == default_port else f":{port}"
+                return f"{scheme}://{ip}{port_part}/"
+
+        return f"http://{ip}/"
 
     def _crawl(
         self, task: Task, base_url: str, asset_ip: str

@@ -53,7 +53,10 @@ scope only**, using Nmap XML adapter when available or falling back to a pure
 stdlib non-blocking TCP socket scan (zero external dependencies) if nmap is
 missing or fails at runtime. Output normalises to canonical asset/service
 records written to the shared store. It raises follow-up tasks; it does not
-decide to attack anything.
+decide to attack anything. The Web Worker uses the discovered service port
+(including 8080 for a local Juice Shop instance) instead of assuming every web
+service listens on port 80 or 443. Every HTTP request remains subject to the
+locked-scope gate.
 
 ### Phase E — Parallel specialist assessment
 The orchestrator schedules independent work simultaneously: Web Worker tasks

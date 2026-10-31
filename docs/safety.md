@@ -52,6 +52,8 @@ Properties:
   Use it only after organiser approval and only as an isolated instance with
   an explicitly locked scope. Do not assess public or internet-accessible
   instances; record the scope decision and lab-side evidence for validation.
+  The local development recipe in `labs/juice-shop/README.md` binds the app to
+  loopback and uses an internal Docker network.
 - Masscan is banned in the repo config until benchmarks + organiser limits
   justify it.
 - Static analysis only for binaries by default (no dynamic execution of

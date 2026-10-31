@@ -83,6 +83,10 @@ Open any OpenCode session inside `CyberForge_CART/`:
 Testing only within organiser-selected scope; non-destructive by design.
 Gate details and house rules: `docs/safety.md`.
 
+Local OWASP Juice Shop lab setup (loopback-bound, isolated Docker network):
+`labs/juice-shop/README.md`. The lab recipe does not count as validation
+evidence; controlled-run results and benchmarks are still pending.
+
 ## Spec of record
 
 `CyberForge_CART_Architecture_Design_Spec_v0.1.md` (parent directory) — this

@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cart.advisor import RemediationAdvisor
 from cart.attackpath import AttackPathBuilder
@@ -31,6 +32,7 @@ from cart.workers.binary import (
     scan_flags as bin_scan_flags,
 )
 from cart.workers.web import (
+    WebWorker,
     extract_html_comments,
     looks_like_binary_url,
 )
@@ -365,6 +367,59 @@ class TestWebFlagHelpers(unittest.TestCase):
             self.assertTrue(looks_like_binary_url(f"https://lab.local{path}"))
         for path in ("/index.html", "/notes.txt", "/api/users", "/no/ext"):
             self.assertFalse(looks_like_binary_url(f"https://lab.local{path}"))
+
+
+class TestWebWorkerDiscoveredPort(unittest.TestCase):
+    """Web crawling must honor discovered non-default HTTP service ports."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.conn = connect(Path(self.tmpdir.name) / "web_port.db")
+        self.conn.execute(
+            "INSERT INTO runs (run_id, status, tier) VALUES ('run_local', 'running', 'breach')"
+        )
+        self.conn.execute(
+            "INSERT INTO assets "
+            "(asset_id, run_id, asset_type, canonical_key, first_seen, last_seen) "
+            "VALUES ('asset_local', 'run_local', 'host', '127.0.0.1', '', '')"
+        )
+        self.conn.execute(
+            "INSERT INTO services "
+            "(service_id, asset_id, protocol, port, service_name, version, state) "
+            "VALUES ('svc_local', 'asset_local', 'tcp', 8080, 'http-proxy', '', 'open')"
+        )
+        self.conn.commit()
+        self.gate = PolicyGate(
+            ScopeManifest(
+                scope_version="local_v1",
+                included_hosts=["127.0.0.1"],
+                locked_at=utc_now(),
+            )
+        )
+        self.gate.bind_store(self.conn)
+        self.worker = WebWorker(self.conn, self.gate, "run_local", request_delay_s=0)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmpdir.cleanup()
+
+    def test_run_uses_discovered_http_port(self):
+        task = Task(
+            task_id="web_local",
+            task_type="web_crawl_endpoint_discovery",
+            owner="web",
+            target_id="asset_local",
+            status=TaskStatus.READY,
+        )
+        Orchestrator(self.conn, "run_local").create_task(task)
+        with patch.object(self.worker, "_crawl", return_value=([], [], [], [])):
+            result = self.worker.run(task)
+
+        self.assertEqual(result["base_url"], "http://127.0.0.1:8080/")
+        decision = self.conn.execute(
+            "SELECT decision FROM scope_decisions_log ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(decision[0], "allow")
 
 
 class TestPolicyGateDynamicBinary(unittest.TestCase):

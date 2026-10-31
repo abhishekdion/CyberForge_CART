@@ -1,0 +1,14 @@
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    ports:
+      - "127.0.0.1:8080:3000"
+    networks:
+      - isolated_lab
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  isolated_lab:
+    internal: true

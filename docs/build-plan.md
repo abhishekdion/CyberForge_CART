@@ -26,7 +26,9 @@ authorization and use an isolated instance with an explicitly locked scope.
 Do not treat an internet-accessible instance or its vulnerable-by-design
 status as authorization. Record the exact test setup, ground truth, scope
 decision audit, and run evidence before claiming validation or benchmark
-results.
+results. A loopback-only Compose recipe is available in
+`labs/juice-shop/README.md`; it is setup support, not evidence that validation
+has been completed.
 
 ## Framework spike (spec section 8) — outcome
 
