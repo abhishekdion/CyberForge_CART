@@ -6,9 +6,11 @@ coordinates specialist agents through a shared typed store, verifies findings
 before trusting them, maps every action to PTES, and produces one
 evidence-backed report with an attack path.
 
-> **Status:** project scaffold + frozen data contracts (build-order step 1
-> done, step 3 partial). No active scanning code exists yet — by design, gate
-> and denial tests come first. See `docs/build-plan.md`.
+> **Status:** working prototype. Preflight, scope selection, gated workers,
+> verification, reporting, and the local dashboard are implemented. The unit
+> suite passes, but controlled-lab validation, ground-truth evaluation, and
+> benchmarks are still pending; this is not yet a validated release. See
+> `docs/build-plan.md`.
 
 ## Quick start (developers)
 
@@ -25,9 +27,9 @@ python -m venv .venv
 .\.venv\Scripts\ruff check src
 ```
 
-Judge path (target, not yet implemented): install prerequisites →
-**one launch command** → organiser selects the lab → start → one final report +
-git-appliable `.patch` files in `reports/patches/`.
+Intended judge path: install prerequisites → organiser selects the authorised
+lab and locks scope → start → report and any applicable remediation patches.
+The end-to-end judge path has not yet been rehearsed in a controlled lab.
 
 ## How it works (the short version)
 

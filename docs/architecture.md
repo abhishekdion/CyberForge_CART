@@ -32,19 +32,23 @@ flowchart TD
 
 | Component (spec 5.x) | Module | Status |
 |---|---|---|
-| CLI/local control page | `src/cart/cli.py` | commands scaffolded: `preflight run status report` |
-| Candidate Network Discovery | `src/cart/preflight.py` | stub → build step 2 |
+| CLI/local control page | `src/cart/cli.py`, `src/cart/ui.py` | `preflight`, `select`, `run`, `status`, `report`, and `ui` commands implemented; default dashboard bind is localhost |
+| Candidate Network Discovery | `src/cart/preflight.py` | Windows/POSIX local interface and route metadata; candidate listing only, no probing |
 | Scope Registry & Policy Gate | `src/cart/scope.py` | fail-closed IP/CIDR/host/binary checks implemented |
-| Controller/Orchestrator | `src/cart/orchestrator.py` | task graph + state machine implemented; scheduling wiring → step 4 |
+| Controller/Orchestrator | `src/cart/orchestrator.py` | SQLite-backed task scheduling, deduplication, bounded concurrency, budgets, retries, and state transitions implemented |
 | Network Worker | `src/cart/workers/network.py` | Nmap XML adapter + zero-dependency stdlib TCP socket scan fallback when nmap is missing or fails at runtime; normalises to canonical Asset/Service records |
 | Web Worker | `src/cart/workers/web.py` | stdlib gate-checked crawler: forms/endpoints, planted-flag hunt (body / HTML comments / HTTP headers), binary-link discovery (`.exe/.bin/.elf/.so/.dll`) with hash registration and task hand-off |
 | Binary Worker | `src/cart/workers/binary.py` | hash-verified static analysis: header parse, strings, planted-flag hunt, unsafe libc function table (`strcpy/gets/system/sprintf/popen/strcat` → `binary_unsafe_function`) |
 | Remediation Advisor | `src/cart/advisor.py` | rule-based plain-English advisories + git-appliable `.patch` files via `export_patches()` for CONFIRMED findings, verified with `git apply --check` (build step 9) |
 | Agent Tracer | `src/cart/tracing.py` | span tracing to `traces/agent_traces.jsonl`; optional LangSmith export when `LANGSMITH_API_KEY`/`LANGCHAIN_API_KEY` is set |
-| Verification Service | `src/cart/verify.py` | stub → step 7 |
+| Verification Service | `src/cart/verify.py` | deterministic finding playbooks and evidence-backed status transitions implemented |
 | Attack-path Builder | `src/cart/attackpath.py` | evidence-backed attack path from relationships table; interactive SVG rendered by local web dashboard |
 | Report Generator / Local Web Dashboard | `src/cart/report.py` + `ui.py` | consolidated Markdown/JSON report generation + zero-dependency localhost control page (multi-agent status, CTF trophy case, PolicyGate audit logs, node inspection `/api/asset`, patch export `/api/patches`) |
 | Shared store | `src/cart/models.py` + `store.py` | full record set + SQLite DDL implemented |
+
+Implementation status does not mean lab-validated: controlled target runs,
+ground-truth scoring, and performance benchmarks remain pending (see
+`docs/build-plan.md`).
 
 ## Agent coordination model (spec section 8)
 

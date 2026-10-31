@@ -83,15 +83,17 @@ docs per the `cart-docs` skill in the same change.
 ## Steps 9–10 — Validation + demo (in progress)
 
 - [x] Unit test suite covering scope, budgets, orchestrator, verify, paths, reports
-- [ ] Controlled validation lab plumbing (Laptop 3 host)
+- [ ] Confirm OWASP Juice Shop is organiser-approved and provision an isolated validation instance
+- [ ] Validate that the selected scope is explicit and that out-of-scope destinations are denied and audited; do not run against an unapproved or internet-accessible target
 - [ ] Ground-truth planted-host/binary evaluator
 - [ ] Benchmark run at Recon tier → tune budgets
 - [ ] README quick start tested verbatim + judge rehearsal
+- [ ] Record test setup, ground truth, run evidence, and measured results before marking validation complete
 
 ## Deferred / open decisions
 
 - [x] Framework spike: custom runner vs LangGraph (documented in docs/build-plan.md — keep custom orchestrator.py, stdlib-first)
-- [x] Tier choice (Recon/Breach/Deep) after benchmarks (default `recon` documented; benchmark-tuned at Step 10)
+- [ ] Final tier choice (Recon/Breach/Deep) after benchmarks (`recon` remains the default)
 - [x] Optional LLM integration decision (documented: no cloud/LLM dependency in critical path; advisory-only boundary per docs/agents-and-llms.md)
 - [ ] Organiser answers to spec section 15 items — require organiser input, tracked in docs/build-plan.md "Open decisions" section:
     - PRD scope-input discrepancy (prefix vs candidate confirmation vs both)

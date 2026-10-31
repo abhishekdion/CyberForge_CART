@@ -48,6 +48,10 @@ Properties:
 - Development machines **never** double as scan targets by accident: local
   tests run against a dedicated validation lab network (Laptop 3 hosts it)
   or loopback mocks — never against random LAN devices.
+- OWASP Juice Shop is only a proposed validation target, not authorization.
+  Use it only after organiser approval and only as an isolated instance with
+  an explicitly locked scope. Do not assess public or internet-accessible
+  instances; record the scope decision and lab-side evidence for validation.
 - Masscan is banned in the repo config until benchmarks + organiser limits
   justify it.
 - Static analysis only for binaries by default (no dynamic execution of

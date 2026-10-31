@@ -1,0 +1,64 @@
+{
+  "run_metadata": {
+    "run_id": "run_be9cdef7dc40",
+    "status": "partial",
+    "tier": "recon",
+    "started_at": "2026-10-31T15:45:25+00:00",
+    "completed_at": "2026-10-31T15:45:29+00:00",
+    "scope_version": "scope_dc2572297521"
+  },
+  "executive_summary": "Assessment run run_be9cdef7dc40 (PARTIAL) discovered 1 asset(s) and 2 open service(s). Identified 0 finding(s) with 0 confirmed. Scope safety enforced 3 out-of-scope denials with 0 safety leaks.",
+  "scope_manifest": {
+    "version": "scope_dc2572297521",
+    "prefixes": [
+      "127.0.0.1/32"
+    ],
+    "hosts": [],
+    "exclusions": [],
+    "binary_hashes": {},
+    "created_by": "organiser-cli",
+    "locked_at": "2026-10-31T15:45:21+00:00"
+  },
+  "inventory": [
+    {
+      "asset_id": "asset_5aad992123fd",
+      "type": "host",
+      "canonical_key": "127.0.0.1",
+      "first_seen": "2026-10-31T15:45:26+00:00",
+      "last_seen": "2026-10-31T15:45:26+00:00",
+      "services": [
+        {
+          "service_id": "svc_2c1642a98264",
+          "protocol": "tcp",
+          "port": 135,
+          "name": "msrpc",
+          "version": "",
+          "state": "open"
+        },
+        {
+          "service_id": "svc_234afbac3430",
+          "protocol": "tcp",
+          "port": 445,
+          "name": "microsoft-ds",
+          "version": "",
+          "state": "open"
+        }
+      ]
+    }
+  ],
+  "findings": [],
+  "attack_paths": [],
+  "metrics": {
+    "scope_safety_out_of_bounds_probes": 0,
+    "scope_decisions_allowed": 2,
+    "scope_decisions_denied": 3,
+    "total_assets_discovered": 1,
+    "total_services_discovered": 2,
+    "total_findings": 0,
+    "confirmed_findings": 0,
+    "verification_rate_pct": 100.0,
+    "false_alarm_rate_pct": 0.0,
+    "runtime_seconds": 4.0,
+    "autonomy_interventions": 0
+  }
+}

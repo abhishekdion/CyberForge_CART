@@ -12,10 +12,21 @@
 | 6 | Web Worker + Binary Worker independently | **done** (workers/web.py, workers/binary.py) |
 | 7 | Verification lifecycle + evidence store | **done** (verify.py) |
 | 8 | Attack-path generation + unified reporting | **done** (attackpath.py, report.py, cli) |
-| 9 | Phase 3 controlled validation, small → larger tiers | in progress (unit test suite complete) |
+| 9 | Phase 3 controlled validation, small → larger tiers | **pending** (unit suite passes; no controlled-lab run or ground-truth results recorded) |
 | 10 | Benchmark, tune limits, README + judge rehearsal | not started |
 
 Track task-level detail in `TODO.md`.
+
+### Proposed validation target: OWASP Juice Shop
+
+OWASP Juice Shop has been proposed as a validation target, but no deployment,
+organiser approval, or CART run against it is recorded here. Treat it as a
+candidate lab only: before any active assessment, confirm the organisers'
+authorization and use an isolated instance with an explicitly locked scope.
+Do not treat an internet-accessible instance or its vulnerable-by-design
+status as authorization. Record the exact test setup, ground truth, scope
+decision audit, and run evidence before claiming validation or benchmark
+results.
 
 ## Framework spike (spec section 8) — outcome
 
@@ -124,5 +135,6 @@ Minus separately: attack-path correctness and flag capture (bonus items).
 4. Supplied binary formats/sizes/symbols
 5. Internet/API availability at the event
 6. Laptop 2/3 specs
-7. Tier choice (Recon/Breach/Deep) after benchmarks
-8. Framework spike outcome (LangGraph vs custom runner)
+7. Final tier choice (Recon/Breach/Deep) after controlled benchmarks; `recon`
+   remains the default meanwhile
+8. Framework spike is resolved: retain the custom orchestrator
