@@ -145,8 +145,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_dedupe ON tasks(dedupe_key) WHERE de
 """
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
+def connect(db_path: str | Path, check_same_thread: bool = False) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.executescript(SCHEMA)
     return conn

@@ -1,0 +1,40 @@
+{
+  "run_metadata": {
+    "run_id": "run_d17b54c07631",
+    "status": "partial",
+    "tier": "recon",
+    "started_at": "2026-10-31T12:50:23+00:00",
+    "completed_at": "2026-10-31T12:50:25+00:00",
+    "scope_version": "scope_e6bd6607e1b0"
+  },
+  "executive_summary": "Assessment run run_d17b54c07631 (PARTIAL) discovered 0 asset(s) and 0 open service(s). Identified 0 finding(s) with 0 confirmed. Scope safety enforced 0 out-of-scope denials with 0 safety leaks.",
+  "scope_manifest": {
+    "version": "scope_e6bd6607e1b0",
+    "prefixes": [
+      "127.0.0.1/32"
+    ],
+    "hosts": [],
+    "exclusions": [],
+    "binary_hashes": {
+      "attackpath.py": "a600d3ed38756d52dc97e96b007fb2f00f89d544e266e4a986525fd7e8ce81f0"
+    },
+    "created_by": "organiser-cli",
+    "locked_at": "2026-10-31T12:50:17+00:00"
+  },
+  "inventory": [],
+  "findings": [],
+  "attack_paths": [],
+  "metrics": {
+    "scope_safety_out_of_bounds_probes": 0,
+    "scope_decisions_allowed": 0,
+    "scope_decisions_denied": 0,
+    "total_assets_discovered": 0,
+    "total_services_discovered": 0,
+    "total_findings": 0,
+    "confirmed_findings": 0,
+    "verification_rate_pct": 100.0,
+    "false_alarm_rate_pct": 0.0,
+    "runtime_seconds": 2.0,
+    "autonomy_interventions": 0
+  }
+}

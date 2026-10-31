@@ -8,9 +8,12 @@ fails closed: missing, ambiguous or unresolvable scope means DENY.
 from __future__ import annotations
 
 import ipaddress
+import socket
+import sqlite3
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
-from .models import ScopeDecision, ScopeManifest
+from .models import ScopeDecision, ScopeManifest, new_id, utc_now
 
 
 class ScopeNotLockedError(RuntimeError):
@@ -41,12 +44,20 @@ class PolicyGate:
         self._excluded_nets = [
             ipaddress.ip_network(e, strict=False) for e in manifest.exclusions
         ]
+        self._conn: sqlite3.Connection | None = None
+
+    def bind_store(self, conn: sqlite3.Connection) -> None:
+        """Attach a live DB connection so record_decision can persist decisions."""
+        self._conn = conn
+
+    # ------------------------------------------------------------------
+    # Core IP/network checks
+    # ------------------------------------------------------------------
 
     def check_destination(self, target: str) -> ScopeDecisionResult:
         """Check one network destination (IP or CIDR) against the locked scope."""
         try:
             net = ipaddress.ip_network(target, strict=False)
-            # .hosts() is empty for /32 and /128; fall back to the network address itself.
             all_addrs: list = list(net.hosts()) or [net.network_address]
         except ValueError:
             return ScopeDecisionResult(
@@ -80,9 +91,58 @@ class PolicyGate:
             ScopeDecision.DENY, f"{presented} not resolvable to locked scope", presented
         )
 
-    def check_url(self, url: str) -> ScopeDecisionResult:  # noqa: ARG002
-        """Web URL check incl. redirect destinations. Implemented with web worker."""
-        raise NotImplementedError("URL/redirect gate lands with the Web Worker (FR-2)")
+    # ------------------------------------------------------------------
+    # URL / web check (resolves hostname → IP, then delegates to check_ip)
+    # ------------------------------------------------------------------
+
+    def check_url(self, url: str) -> ScopeDecisionResult:
+        """Check a web URL incl. hostname resolution against the locked scope.
+
+        Steps:
+        1. Parse the URL — if unparseable, DENY immediately.
+        2. Resolve the hostname to IP(s) — resolution failure → DENY.
+        3. Every resolved IP must pass check_ip (exclusions win).
+        """
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname
+        except Exception:  # noqa: BLE001
+            return ScopeDecisionResult(ScopeDecision.DENY, f"unparseable URL: {url!r}", url)
+
+        if not hostname:
+            return ScopeDecisionResult(
+                ScopeDecision.DENY, f"no hostname in URL: {url!r}", url
+            )
+
+        # Resolve hostname → IPs
+        try:
+            addr_infos = socket.getaddrinfo(hostname, None)
+            resolved_ips = list({info[4][0] for info in addr_infos})
+        except socket.gaierror as exc:
+            return ScopeDecisionResult(
+                ScopeDecision.DENY,
+                f"hostname {hostname!r} could not be resolved: {exc}",
+                url,
+            )
+
+        for ip_str in resolved_ips:
+            result = self.check_ip(ip_str)
+            if result.decision is ScopeDecision.DENY:
+                return ScopeDecisionResult(
+                    ScopeDecision.DENY,
+                    f"URL {url!r} resolves to {ip_str} which is {result.reason}",
+                    url,
+                )
+
+        return ScopeDecisionResult(
+            ScopeDecision.ALLOW,
+            f"URL hostname {hostname!r} resolves to in-scope IPs",
+            url,
+        )
+
+    # ------------------------------------------------------------------
+    # Binary file check
+    # ------------------------------------------------------------------
 
     def check_binary_file(self, path: str) -> ScopeDecisionResult:
         sha256 = self.manifest.binary_hashes.get(path)
@@ -94,7 +154,56 @@ class PolicyGate:
             )
         return ScopeDecisionResult(ScopeDecision.ALLOW, "registered binary hash", path)
 
-    def record_decision(self, requested: str, result: ScopeDecisionResult, run_id: str | None = None) -> None:
+    # ------------------------------------------------------------------
+    # Audit log
+    # ------------------------------------------------------------------
+
+    def record_decision(
+        self,
+        requested: str,
+        result: ScopeDecisionResult,
+        run_id: str | None = None,
+    ) -> None:
         """Persist allow/deny decisions in scope_decisions_log (audit requirement)."""
-        # Implemented with store.py wiring in build-order step 3.
-        raise NotImplementedError
+        if self._conn is None:
+            return  # store not bound yet (e.g. during preflight / unit tests)
+        event_id = new_id("sdl")
+        self._conn.execute(
+            """
+            INSERT INTO scope_decisions_log
+                (event_id, run_id, requested_target, decision, reason, at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                run_id,
+                requested,
+                result.decision.value,
+                result.reason,
+                utc_now(),
+            ),
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Convenience: check + record in one call
+    # ------------------------------------------------------------------
+
+    def gate(
+        self,
+        target: str,
+        run_id: str | None = None,
+        *,
+        is_url: bool = False,
+        is_binary: bool = False,
+    ) -> ScopeDecisionResult:
+        """All-in-one gate: check + record decision. Raises nothing — callers
+        must inspect result.decision and refuse action on DENY."""
+        if is_url:
+            result = self.check_url(target)
+        elif is_binary:
+            result = self.check_binary_file(target)
+        else:
+            result = self.check_destination(target)
+        self.record_decision(target, result, run_id)
+        return result
