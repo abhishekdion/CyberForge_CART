@@ -293,6 +293,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             workers = worker_contexts.get_nowait()
             worker_local.workers = workers
         net_worker, web_worker, bin_worker = workers
+        gate.bind_store(net_worker.conn)
         print(f"[*] Executing task {task.task_id} [{task.task_type}] on target {task.target_id}")
         if task.owner == "network":
             return net_worker.run(task)

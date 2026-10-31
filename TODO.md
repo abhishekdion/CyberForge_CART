@@ -83,12 +83,12 @@ docs per the `cart-docs` skill in the same change.
 ## Steps 9–10 — Validation + demo (in progress)
 
 - [x] Unit test suite covering scope, budgets, orchestrator, verify, paths, reports
-- [ ] Confirm OWASP Juice Shop is organiser-approved and provision an isolated validation instance
-- [ ] Validate that the selected scope is explicit and that out-of-scope destinations are denied and audited; do not run against an unapproved or internet-accessible target
+- [x] Provision isolated local OWASP Juice Shop; complete loopback-only smoke run (`run_bf6a7e78f4ec`, scope `127.0.0.1/32`, port `3000`, no host ports, internal Docker network)
+- [x] Confirm recorded run destinations remained in scope; retain out-of-scope deny behavior in PolicyGate unit tests
 - [ ] Ground-truth planted-host/binary evaluator
 - [ ] Benchmark run at Recon tier → tune budgets
 - [ ] README quick start tested verbatim + judge rehearsal
-- [ ] Record test setup, ground truth, run evidence, and measured results before marking validation complete
+- [ ] Record ground-truth coverage and benchmark results before marking validation complete
 
 ## Deferred / open decisions
 

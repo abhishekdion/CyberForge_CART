@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from .models import ScopeDecision, ScopeManifest, new_id, utc_now
-from .store import connect
 
 
 class ScopeNotLockedError(RuntimeError):
@@ -47,17 +46,16 @@ class PolicyGate:
             ipaddress.ip_network(e, strict=False) for e in manifest.exclusions
         ]
         self._conn: sqlite3.Connection | None = None
-        self._db_path: str | None = None
+        self._thread_store = threading.local()
         self._record_lock = threading.Lock()
         # In-run downloaded copies of in-scope content (web→binary hand-off).
         # NEVER writes to the locked manifest; targets themselves never grow.
         self._dynamic_binaries: dict[str, str] = {}  # path -> sha256
 
     def bind_store(self, conn: sqlite3.Connection) -> None:
-        """Attach a live DB connection so record_decision can persist decisions."""
+        """Attach a DB connection for audit writes in the current thread."""
         self._conn = conn
-        db_row = conn.execute("PRAGMA database_list").fetchone()
-        self._db_path = db_row[2] if db_row and db_row[2] else None
+        self._thread_store.conn = conn
 
     # ------------------------------------------------------------------
     # Core IP/network checks
@@ -203,6 +201,7 @@ class PolicyGate:
         """Persist allow/deny decisions in scope_decisions_log (audit requirement)."""
         if self._conn is None:
             return  # store not bound yet (e.g. during preflight / unit tests)
+        conn = getattr(self._thread_store, "conn", self._conn)
         event_id = new_id("sdl")
         values = (
             event_id,
@@ -217,17 +216,9 @@ class PolicyGate:
                 (event_id, run_id, requested_target, decision, reason, at)
             VALUES (?, ?, ?, ?, ?, ?)
         """
-        if self._db_path is not None:
-            audit_conn = connect(self._db_path, initialize_schema=False)
-            try:
-                audit_conn.execute(query, values)
-                audit_conn.commit()
-            finally:
-                audit_conn.close()
-        else:
-            with self._record_lock:
-                self._conn.execute(query, values)
-                self._conn.commit()
+        with self._record_lock:
+            conn.execute(query, values)
+            conn.commit()
 
     # ------------------------------------------------------------------
     # Convenience: check + record in one call

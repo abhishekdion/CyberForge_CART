@@ -86,3 +86,14 @@ observations, run duration, audit-log results, and report. Verify that every
 recorded network destination is loopback and that an out-of-scope test
 destination is denied by unit tests rather than by probing a real external
 system.
+
+## Latest verified smoke run
+
+Run `run_bf6a7e78f4ec` completed with status `COMPLETED` against the pinned
+local image (`sha256:42843723a7bf4246aa5d63c324978b17ef296ac78434aeddd34c427bfb5853f`).
+The locked scope was `127.0.0.1/32`; all 8 recorded policy decisions were
+allowed loopback targets. Host discovery, port discovery, and the web crawl
+all succeeded, identifying `127.0.0.1:3000`. CART emitted no findings in this
+run; that is **not** evidence that Juice Shop has no vulnerabilities or that
+CART has broad vulnerability coverage. Ground-truth scoring and benchmarking
+remain open.

@@ -1,0 +1,56 @@
+{
+  "run_metadata": {
+    "run_id": "run_bf6a7e78f4ec",
+    "status": "completed",
+    "tier": "breach",
+    "started_at": "2026-10-31T17:41:16+00:00",
+    "completed_at": "2026-10-31T17:41:17+00:00",
+    "scope_version": "scope_7bcf8f08914a"
+  },
+  "executive_summary": "Assessment run run_bf6a7e78f4ec (COMPLETED) discovered 1 asset(s) and 1 open service(s). Identified 0 finding(s) with 0 confirmed. Scope safety enforced 0 out-of-scope denials with 0 safety leaks.",
+  "scope_manifest": {
+    "version": "scope_7bcf8f08914a",
+    "prefixes": [
+      "127.0.0.1/32"
+    ],
+    "hosts": [],
+    "exclusions": [],
+    "binary_hashes": {},
+    "created_by": "organiser-cli",
+    "locked_at": "2026-10-31T17:41:14+00:00"
+  },
+  "inventory": [
+    {
+      "asset_id": "asset_89bb55a01442",
+      "type": "host",
+      "canonical_key": "127.0.0.1",
+      "first_seen": "2026-10-31T17:41:16+00:00",
+      "last_seen": "2026-10-31T17:41:16+00:00",
+      "services": [
+        {
+          "service_id": "svc_cac2d40b6651",
+          "protocol": "tcp",
+          "port": 3000,
+          "name": "http",
+          "version": "",
+          "state": "open"
+        }
+      ]
+    }
+  ],
+  "findings": [],
+  "attack_paths": [],
+  "metrics": {
+    "scope_safety_out_of_bounds_probes": 0,
+    "scope_decisions_allowed": 8,
+    "scope_decisions_denied": 0,
+    "total_assets_discovered": 1,
+    "total_services_discovered": 1,
+    "total_findings": 0,
+    "confirmed_findings": 0,
+    "verification_rate_pct": 100.0,
+    "false_alarm_rate_pct": 0.0,
+    "runtime_seconds": 1.0,
+    "autonomy_interventions": 0
+  }
+}

@@ -126,6 +126,25 @@ class TestPolicyGate(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_nested_audit_write_reenters_database_write_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "nested_audit.db"
+            conn = connect(db_path)
+            gate = PolicyGate(self.manifest)
+            gate.bind_store(conn)
+            try:
+                conn.execute(
+                    "INSERT INTO runs (run_id, status, tier) VALUES ('nested', 'running', 'recon')"
+                )
+                gate.gate("192.168.1.25", run_id="nested")
+                conn.commit()
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM scope_decisions_log WHERE run_id='nested'"
+                ).fetchone()[0]
+                self.assertEqual(count, 1)
+            finally:
+                conn.close()
+
 
 class TestBudgetAndOrchestrator(unittest.TestCase):
     def setUp(self):

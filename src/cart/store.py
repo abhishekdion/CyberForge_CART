@@ -12,16 +12,16 @@ import threading
 from pathlib import Path
 
 _LOCKS_GUARD = threading.Lock()
-_DATABASE_WRITE_LOCKS: dict[str, threading.Lock] = {}
+_DATABASE_WRITE_LOCKS: dict[str, threading.RLock] = {}
 _WRITE_STATEMENTS = {"ALTER", "CREATE", "DELETE", "DROP", "INSERT", "PRAGMA", "REINDEX", "REPLACE", "UPDATE", "VACUUM"}
 
 
-def _database_write_lock(db_path: str) -> threading.Lock:
+def _database_write_lock(db_path: str) -> threading.RLock:
     key = str(Path(db_path).resolve())
     with _LOCKS_GUARD:
         lock = _DATABASE_WRITE_LOCKS.get(key)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _DATABASE_WRITE_LOCKS[key] = lock
         return lock
 
@@ -34,7 +34,7 @@ class SerializedSQLiteConnection(sqlite3.Connection):
         db_row = super().execute("PRAGMA database_list").fetchone()
         db_path = db_row[2] if db_row else ""
         self._database_write_lock = (
-            _database_write_lock(db_path) if db_path else threading.Lock()
+            _database_write_lock(db_path) if db_path else threading.RLock()
         )
         self._holds_database_write_lock = False
 

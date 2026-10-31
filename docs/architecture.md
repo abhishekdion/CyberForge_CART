@@ -76,8 +76,9 @@ SQLite (`run_id`-scoped tables: runs, assets, services, tasks, tool_events,
 findings, evidence, relationships, report_artifacts) + filesystem artifacts
 for raw tool outputs and the report. Graph edges live in the `relationships`
 table — no graph database in v0.1. CLI worker threads receive independent
-SQLite connections; PolicyGate audit writes also use independent connections,
-while scheduling and state transitions remain on the controller connection.
+SQLite connections; PolicyGate audit writes use the current worker thread's
+connection and are serialized. Scheduling and state transitions remain on the
+controller connection.
 
 ## Deployment (spec section 11)
 

@@ -59,7 +59,8 @@ service listens on port 80 or 443. Every HTTP request remains subject to the
 locked-scope gate, and redirects are rejected before following when the
 destination is out of scope. An optional `cart run --ports` allowlist restricts
 the network worker's TCP discovery; without it, both scanner backends use the
-same common-port catalog.
+same common-port catalog. Worker threads use separate SQLite connections;
+PolicyGate audit writes use the worker thread's connection.
 
 ### Phase E — Parallel specialist assessment
 The orchestrator schedules independent work simultaneously: Web Worker tasks

@@ -12,23 +12,23 @@
 | 6 | Web Worker + Binary Worker independently | **done** (workers/web.py, workers/binary.py) |
 | 7 | Verification lifecycle + evidence store | **done** (verify.py) |
 | 8 | Attack-path generation + unified reporting | **done** (attackpath.py, report.py, cli) |
-| 9 | Phase 3 controlled validation, small → larger tiers | **pending** (unit suite passes; no controlled-lab run or ground-truth results recorded) |
+| 9 | Phase 3 controlled validation, small → larger tiers | **in progress** (isolated Juice Shop smoke run completed; ground-truth evaluation pending) |
 | 10 | Benchmark, tune limits, README + judge rehearsal | not started |
 
 Track task-level detail in `TODO.md`.
 
 ### Proposed validation target: OWASP Juice Shop
 
-OWASP Juice Shop has been proposed as a validation target, but no deployment,
-organiser approval, or CART run against it is recorded here. Treat it as a
-candidate lab only: before any active assessment, confirm the organisers'
-authorization and use an isolated instance with an explicitly locked scope.
-Do not treat an internet-accessible instance or its vulnerable-by-design
-status as authorization. Record the exact test setup, ground truth, scope
-decision audit, and run evidence before claiming validation or benchmark
-results. A loopback-only Compose recipe is available in
-`labs/juice-shop/README.md`; it is setup support, not evidence that validation
-has been completed.
+An isolated local OWASP Juice Shop smoke run completed with scope
+`127.0.0.1/32`, TCP port `3000` only, an internal Docker network, and no
+published host ports. Run `run_bf6a7e78f4ec` completed in about one second:
+one loopback host and its HTTP service were discovered; all three tasks
+succeeded; all eight policy decisions allowed loopback targets; no findings
+were emitted. This smoke run validates basic plumbing only, not vulnerability
+coverage or detection accuracy. Ground-truth evaluation and benchmarking are
+still pending. Never treat a public Juice Shop instance or its vulnerable-by-
+design status as authorization. Setup and rerun instructions are in
+`labs/juice-shop/README.md`.
 
 ## Framework spike (spec section 8) — outcome
 
