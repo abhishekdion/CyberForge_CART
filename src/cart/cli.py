@@ -213,6 +213,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # Optional live background UI dashboard
     if getattr(args, "ui", False):
         import threading
+
         from .ui import run_dashboard_server
         def _run_ui():
             srv = run_dashboard_server(db_path=args.db, host="127.0.0.1", port=8080)
@@ -290,6 +291,20 @@ def cmd_run(args: argparse.Namespace) -> int:
             for asset_id in result.get("assets", []):
                 is_web = asset_id in web_assets
                 orchestrator.on_host_discovered(asset_id, is_web=is_web)
+        elif task.task_type == "web_crawl_endpoint_discovery":
+            # Web→Binary agent hand-off: auto-enqueue static analysis for
+            # every binary artefact downloaded during the crawl (no human
+            # intervention after scope lock).
+            for disc in result.get("discovered_binaries", []):
+                bin_path = disc.get("path", "")
+                if not bin_path:
+                    continue
+                print(
+                    f"[+] Web→Binary hand-off: binary downloaded from "
+                    f"{disc.get('url', '?')} (sha256 {disc.get('sha256', '?')[:16]}...) "
+                    f"→ auto-enqueueing binary agent."
+                )
+                orchestrator.on_binary_discovered(bin_path, source_task=task)
 
     # Run scheduling loop
     print("[*] Dispatching tasks across orchestrator loop...")

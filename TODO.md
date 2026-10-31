@@ -62,6 +62,24 @@ docs per the `cart-docs` skill in the same change.
 - [x] Metrics: coverage/verification/false-alarm/scope/runtime/autonomy
 - [x] One-command CLI experience (`preflight`, `select`, `run`, `status`, `report`)
 
+## Judge-requirements build (hackathon feedback) — done
+
+- [x] Planted-flag hunter: Web Worker scans page bodies, HTML comments and HTTP
+      headers; Binary Worker scans extracted strings → high-severity
+      `ctf_planted_flag` CANDIDATE findings (`flag{}` / `CTF{}` / `CyberForge{}`)
+- [x] Unsafe libc function detection: `strcpy gets system sprintf popen strcat`
+      → `binary_unsafe_function` findings with CWE-based explanations
+- [x] Web→Binary agent hand-off: Web Worker downloads `.exe/.bin/.elf/.so/.dll`
+      links (size-capped, sha256, gate-registered for static analysis only);
+      orchestrator `on_binary_discovered` auto-enqueues `binary_static_analysis`
+- [x] Remediation Advisor (`src/cart/advisor.py`): rule-based plain-English
+      advisories + code/config patches per finding type
+- [x] Agent tracing (`src/cart/tracing.py`): spans to `traces/agent_traces.jsonl`
+      with optional LangSmith export when `LANGSMITH_API_KEY` is set
+- [x] Tests: flag/unsafe-function detection (incl. `fgets`≠`gets` false-positive
+      guard), advisor patches, tracer JSONL output, dynamic binary registration
+      scope-safety, hand-off dedupe
+
 ## Steps 9–10 — Validation + demo (in progress)
 
 - [x] Unit test suite covering scope, budgets, orchestrator, verify, paths, reports

@@ -2,25 +2,41 @@
 
 import hashlib
 import json
-import sqlite3
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 
-from cart.attackpath import AttackPathBuilder, PathEdge
+from cart.advisor import RemediationAdvisor
+from cart.attackpath import AttackPathBuilder
 from cart.budget import BudgetExceeded, RunBudget, TaskRetryBudget
 from cart.models import (
-    Asset, Finding, FindingStatus, Relationship, RunStatus, ScopeDecision,
-    ScopeManifest, Service, Task, TaskStatus, new_id, utc_now,
+    FindingStatus,
+    ScopeDecision,
+    ScopeManifest,
+    Task,
+    TaskStatus,
+    utc_now,
 )
 from cart.orchestrator import Orchestrator
-from cart.preflight import list_candidate_networks
 from cart.report import ReportGenerator
 from cart.scope import PolicyGate, ScopeNotLockedError
 from cart.store import connect
+from cart.tracing import AgentTracer, Span
 from cart.verify import VerificationService
-from cart.workers.binary import BinaryWorker, _detect_format, _parse_elf_header
+from cart.workers.binary import (
+    BinaryWorker,
+    scan_unsafe_functions,
+)
+from cart.workers.binary import (
+    scan_flags as bin_scan_flags,
+)
+from cart.workers.web import (
+    extract_html_comments,
+    looks_like_binary_url,
+)
+from cart.workers.web import (
+    scan_flags as web_scan_flags,
+)
 
 
 class TestPolicyGate(unittest.TestCase):
@@ -238,9 +254,337 @@ class TestReportGenerator(unittest.TestCase):
             conn.close()
 
 
+class TestPlantedFlagAndUnsafeBinary(unittest.TestCase):
+    """Judge requirement 1: flag hunter + unsafe C function detection."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.bin_path = Path(self.tmpdir.name) / "vuln_sample.bin"
+        # Printable blob: unsafe libc names + a planted CTF flag
+        payload = (
+            b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+            b"strcpy gets sprintf system popen strcat\x00"
+            b"flag{test_123}\x00logo.png\x00"
+        )
+        self.bin_path.write_bytes(payload)
+
+        self.db_path = Path(self.tmpdir.name) / "test_binary.db"
+        self.conn = connect(self.db_path)
+        self.conn.execute(
+            "INSERT INTO runs (run_id, status, tier) VALUES ('run_bin', 'running', 'recon')"
+        )
+        self.conn.commit()
+
+        manifest = ScopeManifest(
+            scope_version="scope_bin_v1",
+            included_prefixes=["192.168.1.0/24"],
+            # Register the crafted binary by its true SHA-256 (worker re-verifies)
+            binary_hashes={str(self.bin_path): hashlib.sha256(payload).hexdigest()},
+            locked_at=utc_now(),
+        )
+        self.gate = PolicyGate(manifest)
+        self.gate.bind_store(self.conn)
+        self.worker = BinaryWorker(conn=self.conn, gate=self.gate, run_id="run_bin")
+        # tool_events has FK to tasks — persist the task record first
+        self.conn.execute(
+            "INSERT INTO tasks (task_id, task_type, owner, target_id, status) "
+            "VALUES ('task_bin', 'binary_static_analysis', 'binary', ?, 'running')",
+            (str(self.bin_path),),
+        )
+        self.conn.commit()
+        self.task = Task(
+            task_id="task_bin",
+            task_type="binary_static_analysis",
+            owner="binary",
+            target_id=str(self.bin_path),
+        )
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmpdir.cleanup()
+
+    def _finding_rows(self, finding_type: str) -> list[tuple]:
+        return self.conn.execute(
+            "SELECT finding_type, severity, status, summary FROM findings "
+            "WHERE finding_type=?",
+            (finding_type,),
+        ).fetchall()
+
+    def test_flag_detection(self):
+        result = self.worker.run(self.task)
+        rows = self._finding_rows("ctf_planted_flag")
+        self.assertEqual(len(rows), 1, f"expected planted flag finding: {result}")
+        _ftype, severity, status, summary = rows[0]
+        self.assertEqual(severity, "high")
+        self.assertEqual(status, "candidate")  # never auto-confirmed
+        self.assertIn("flag{test_123}", summary)
+
+    def test_unsafe_functions_flagged(self):
+        self.worker.run(self.task)
+        rows = self._finding_rows("binary_unsafe_function")
+        flagged = {r[3].split("'")[1] for r in rows}  # summary: "...'strcpy' found..."
+        expected = {"strcpy", "gets", "system", "sprintf", "popen", "strcat"}
+        self.assertEqual(flagged & expected, expected)
+        for _, severity, status, _ in rows:
+            self.assertEqual(severity, "high")
+            self.assertEqual(status, "candidate")
+        # unsafe findings must carry the CWE explanation in the summary
+        strcpy_row = next(r for r in rows if "strcpy" in r[3])
+        self.assertIn("CWE-120", strcpy_row[3])
+
+    def test_scan_helpers_no_false_positive(self):
+        # 'fgets' must NOT trigger the 'gets' rule
+        triggered = scan_unsafe_functions(["fgets(buf, sizeof(buf), stdin)"])
+        self.assertNotIn("gets", triggered)
+        self.assertEqual(
+            bin_scan_flags(["flag{a}", "CTF{b})", "flag{a}"]),
+            ["flag{a}", "CTF{b}"],  # trailing ')' is not part of the brace match
+        )
+
+
+class TestWebFlagHelpers(unittest.TestCase):
+    """Judge requirement 1 (web side): regex, comments and links."""
+
+    def test_scan_flags_in_body_comment_header(self):
+        body = "<html><!-- flag{admin_area} -->\nflag{main_page}\n</html>"
+        self.assertEqual(
+            web_scan_flags(body), ["flag{admin_area}", "flag{main_page}"]
+        )
+        self.assertEqual(web_scan_flags("X-Flag: CyberForge{hdr-leak}"),
+                         ["CyberForge{hdr-leak}"])
+
+    def test_extract_html_comments(self):
+        self.assertEqual(
+            extract_html_comments("a<!-- one -->b<!-- two\nlines -->c"),
+            ["one", "two\nlines"],
+        )
+
+    def test_binary_link_detection(self):
+        for path in ("/downloads/tool.exe", "/x/impl.so", "/a.ELF", "/b.BIN",
+                     "/lib.dll", "/thing.bin"):
+            self.assertTrue(looks_like_binary_url(f"https://lab.local{path}"))
+        for path in ("/index.html", "/notes.txt", "/api/users", "/no/ext"):
+            self.assertFalse(looks_like_binary_url(f"https://lab.local{path}"))
+
+
+class TestPolicyGateDynamicBinary(unittest.TestCase):
+    """Scope safety for the web→binary hand-off registrations."""
+
+    def setUp(self):
+        self.manifest = ScopeManifest(
+            scope_version="dyn_v1",
+            included_prefixes=["192.168.1.0/24"],
+            locked_at=utc_now(),
+        )
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.conn = connect(Path(self.tmpdir.name) / "dyn.db")
+        self.gate = PolicyGate(self.manifest)
+        self.gate.bind_store(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmpdir.cleanup()
+
+    def test_unregistered_binary_still_denied(self):
+        # Fail closed unchanged: anything not organiser-registered is DENY
+        res = self.gate.check_binary_file("/tmp/unknown_download.bin")
+        self.assertEqual(res.decision, ScopeDecision.DENY)
+
+    def test_register_dynamic_binary_allows_and_audits(self):
+        path = str(Path(self.tmpdir.name) / "downloaded.so")
+        self.gate.register_dynamic_binary(
+            path, "abc123", run_id="run_dyn",
+            reason="downloaded binary from in-scope URL",
+        )
+        res = self.gate.check_binary_file(path)
+        self.assertEqual(res.decision, ScopeDecision.ALLOW)
+        before = self.conn.execute("SELECT COUNT(*) FROM scope_decisions_log").fetchone()[0]
+        self.assertGreaterEqual(before, 1)  # registration was audit-logged
+
+    def test_locked_manifest_never_mutated(self):
+        path = str(Path(self.tmpdir.name) / "downloaded.bin")
+        self.gate.register_dynamic_binary(path, "def456", run_id="run_dyn")
+        stored = self.conn.execute(
+            "SELECT binary_hashes FROM scope_manifests LIMIT 1"
+        ).fetchone()
+        self.assertIsNone(stored)  # manifest untouched (even not written here)
+        self.assertEqual(self.gate.manifest.binary_hashes, {})
+
+
+class TestWebToBinaryHandoff(unittest.TestCase):
+    """Judge requirement 2: automatic binary task enqueue from web results."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.conn = connect(Path(self.tmpdir.name) / "handoff.db")
+        self.orch = Orchestrator(conn=self.conn, run_id="run_ho")
+        self.source = Task(
+            task_id="web_task",
+            task_type="web_crawl_endpoint_discovery",
+            owner="web",
+            target_id="asset_x",
+            status=TaskStatus.SUCCEEDED,
+        )
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmpdir.cleanup()
+
+    def test_enqueue_binary_task(self):
+        new_id_task = self.orch.on_binary_discovered(
+            "/cache/run_ho/abc123.so", source_task=self.source
+        )
+        task = self.orch.get_task(new_id_task)
+        self.assertEqual(task.owner, "binary")
+        self.assertEqual(task.task_type, "binary_static_analysis")
+        self.assertEqual(task.status, TaskStatus.READY)
+        self.assertEqual(task.parent_task_id, "web_task")
+
+    def test_dedupe_prevents_second_enqueue(self):
+        first = self.orch.on_binary_discovered("/cache/x/bin.elf")
+        second = self.orch.on_binary_discovered("/cache/x/bin.elf")
+        self.assertEqual(first, second)
+        count = self.conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE task_type='binary_static_analysis'"
+        ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+
+class TestRemediationAdvisor(unittest.TestCase):
+    """Judge requirement 3: rule-based remediation + patch examples."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.conn = connect(Path(self.tmpdir.name) / "advisor.db")
+        self.conn.execute("INSERT INTO runs (run_id, status, tier) VALUES ('r_adv', 'running', 'recon')")
+        self.conn.execute(
+            "INSERT INTO assets (asset_id, run_id, asset_type, canonical_key, first_seen, last_seen) "
+            "VALUES ('a_adv', 'r_adv', 'host', '10.0.0.1', '', '')"
+        )
+        self.conn.commit()
+        self.advisor = RemediationAdvisor(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmpdir.cleanup()
+
+    def _insert_finding(self, fid: str, finding_type: str, severity: str, summary: str):
+        self.conn.execute(
+            "INSERT INTO findings (finding_id, asset_id, finding_type, severity, status, confidence, summary) "
+            "VALUES (?, 'a_adv', ?, ?, 'confirmed', 'high', ?)",
+            (fid, finding_type, severity, summary),
+        )
+        self.conn.commit()
+
+    def test_unsafe_function_patch(self):
+        self._insert_finding(
+            "f_unsafe", "binary_unsafe_function", "high",
+            "unsafe C functions found: 'strcpy', 'gets'"
+        )
+        adv = self.advisor.advise("f_unsafe")
+        self.assertEqual(
+            set(adv.keys()),
+            {"finding_id", "title", "plain_english_summary", "impact",
+             "recommended_fix", "patch_example"},
+        )
+        self.assertEqual(adv["finding_id"], "f_unsafe")
+        # targeted patches for the exact functions found
+        self.assertIn("strncpy", adv["patch_example"])
+        self.assertIn("fgets", adv["patch_example"])
+        self.assertIn("snprintf", adv["recommended_fix"])
+
+    def test_web_form_patch(self):
+        self._insert_finding(
+            "f_form", "web_form_endpoint", "info",
+            "Form found at http://10.0.0.1/login"
+        )
+        adv = self.advisor.advise("f_form")
+        self.assertIn("csrf", adv["patch_example"].lower())
+        self.assertIn("parameterised", adv["recommended_fix"].lower())
+        self.assertIn("SELECT", adv["patch_example"])
+
+    def test_planted_flag_advisory(self):
+        self._insert_finding(
+            "f_flag", "ctf_planted_flag", "high",
+            "Planted CTF flag flag{test_123} captured in body"
+        )
+        adv = self.advisor.advise("f_flag")
+        self.assertIn("revok", adv["recommended_fix"].lower())
+
+    def test_hardcoded_credential_advisory(self):
+        self._insert_finding(
+            "f_cred", "binary_hardcoded_credential", "medium",
+            "Binary strings matching hardcoded credential pattern"
+        )
+        self.conn.execute(
+            "INSERT INTO evidence (evidence_id, finding_id, source_tool, artifact_path, hash, timestamp, excerpt) "
+            "VALUES ('ev_cred', 'f_cred', 'binary_static_analysis', '', 'h', '', '{\"matches\":[\"password=hunter2\"]}')"
+        )
+        self.conn.commit()
+        adv = self.advisor.advise("f_cred")
+        self.assertIn("environment", adv["recommended_fix"].lower())
+        self.assertIn("os.environ", adv["patch_example"])
+
+    def test_unknown_finding_falls_back(self):
+        self._insert_finding("f_odd", "exotic_curve_weakness", "low", "Weird curve param")
+        adv = self.advisor.advise("f_odd")
+        self.assertIn("defence-in-depth", adv["recommended_fix"].lower())
+        self.assertTrue(adv["patch_example"])
+
+    def test_missing_finding_raises(self):
+        with self.assertRaises(KeyError):
+            self.advisor.advise("f_missing")
+
+
+class TestAgentTracer(unittest.TestCase):
+    """Judge requirement 4: span logging to disk, never raising."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.out_dir = Path(self.tmpdir.name) / "traces"
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_spans_written_to_jsonl(self):
+        tracer = AgentTracer(run_id="r_trace", output_dir=str(self.out_dir))
+        span = tracer.start_span("task_1", "web", "web_crawl_endpoint_discovery")
+        self.assertIsInstance(span, Span)
+        self.assertEqual(span.agent_name, "web")
+        tracer.end_span(span, "succeeded", result_summary="12 endpoints")
+
+        span2 = tracer.start_span("task_2", "binary", "binary_static_analysis")
+        tracer.end_span(span2, "failed", result_summary="hash mismatch")
+
+        path = self.out_dir / "agent_traces.jsonl"
+        self.assertTrue(path.exists())
+        lines = path.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        first = json.loads(lines[0])
+        self.assertEqual(first["task_id"], "task_1")
+        self.assertEqual(first["agent_name"], "web")
+        self.assertEqual(first["status"], "succeeded")
+        self.assertEqual(first["result_summary"], "12 endpoints")
+        self.assertIn("start_time", first)
+        self.assertIn("end_time", first)
+
+    def test_creates_output_dir_and_never_raises(self):
+        nested = Path(self.tmpdir.name) / "deep" / "nested" / "traces"
+        tracer = AgentTracer(run_id="r_trace", output_dir=str(nested))
+        span = tracer.start_span("t", "network", "host_discovery")
+        tracer.end_span(span, "ok")
+        self.assertTrue((nested / "agent_traces.jsonl").exists())
+
+    def test_end_span_rejects_non_span(self):
+        tracer = AgentTracer(run_id="r_trace", output_dir=str(self.out_dir))
+        with self.assertRaises(TypeError):
+            tracer.end_span({"not": "a span"}, "ok")  # type: ignore[arg-type]
+
+
 class TestUIDashboard(unittest.TestCase):
     def test_ui_handler_methods(self):
         import io
+
         from cart.ui import DashboardHandler
 
         with tempfile.TemporaryDirectory() as tmpdir:

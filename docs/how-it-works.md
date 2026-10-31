@@ -56,8 +56,23 @@ not decide to attack anything.
 ### Phase E — Parallel specialist assessment
 The orchestrator schedules independent work simultaneously: Web Worker tasks
 for each in-scope web service, Binary Worker tasks for each organiser-supplied
-binary. Workers exchange typed records — never shell commands — and cannot
-modify the scope or each other's privileges.
+binary (plus any downloaded from crawled pages, see below). Workers exchange
+typed records — never shell commands — and cannot modify the scope or each
+other's privileges.
+
+Planted-flag hunting runs in both specialists: the Web Worker scans every
+crawled page's body, HTML comments, and HTTP headers for `flag{...}`,
+`CTF{...}`, `CyberForge{...}` literals; the Binary Worker scans extracted
+strings. Both emit high-severity `ctf_planted_flag` CANDIDATE findings. The
+Binary Worker additionally flags dangerous libc functions found in symbols or
+strings (`strcpy`, `gets`, `system`, `sprintf`, `popen`, `strcat`) as
+`binary_unsafe_function` (CANDIDATE until verified).
+
+When the Web Worker encounters a link to a binary artefact, it downloads the
+file into a bounded local cache, computes its SHA-256, registers the copy with
+the PolicyGate for static analysis only, and the orchestrator automatically
+enqueues a `binary_static_analysis` task for the Binary Worker — no human
+intervention after scope lock.
 
 ### Phase F — Finding verification
 Candidates land in a verification queue. Outcomes: `CONFIRMED` (repeatable
@@ -73,7 +88,14 @@ One consolidated report: exec summary, scope + exclusions, full inventory,
 findings with severity/PTES/evidence/remediation, evidence-backed attack path,
 metrics (coverage, verification, false alarms, scope safety, runtime,
 autonomy), and tool execution summary. Run ends `COMPLETED`, `PARTIAL`, or
-`ABORTED` with a reason.
+`ABORTED` with a reason. Findings additionally carry rule-based remediation
+from `src/cart/advisor.py`: a plain-English explanation, impact, recommended
+fix and a concrete code/config patch example (tailored per finding type —
+e.g. bounded `fgets`/`snprintf` replacements for unsafe libc functions,
+parameterised queries + CSRF for form endpoints, secret-manager guidance for
+hard-coded credentials). Agent task execution is traced as spans to
+`traces/agent_traces.jsonl` by `src/cart/tracing.py` (optional LangSmith
+export when `LANGSMITH_API_KEY` is set).
 
 ## What is autonomous, precisely
 
@@ -83,6 +105,7 @@ autonomy), and tool execution summary. Run ends `COMPLETED`, `PARTIAL`, or
 | Which targets are tested | Locked manifest (immutable during run) | 10.10.20.0/24 minus exclusions |
 | Every tool action destination | PolicyGate (deterministic code) | deny 10.9.9.9 probe |
 | What to scan next | Orchestrator schedule + budgets | web tasks for :80/:443 hits |
+| Binary artefacts linked from crawled pages | Deterministic hand-off rule | download + sha256 → auto `binary_static_analysis` task |
 | Which finding is real | Verification Service | CONFIRMED with evidence |
 | When to stop | Run budget / stop state | 20-min PRD target |
 | Anything beyond scope | **Nobody** | denied + audited |

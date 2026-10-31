@@ -37,8 +37,10 @@ flowchart TD
 | Scope Registry & Policy Gate | `src/cart/scope.py` | fail-closed IP/CIDR/host/binary checks implemented |
 | Controller/Orchestrator | `src/cart/orchestrator.py` | task graph + state machine implemented; scheduling wiring → step 4 |
 | Network Worker | `src/cart/workers/network.py` | stub → step 5 (Nmap XML adapter candidate) |
-| Web Worker | `src/cart/workers/web.py` | stub → step 6 (Katana/ZAP candidates) |
-| Binary Worker | `src/cart/workers/binary.py` | hash verification implemented; analysis → step 6 (Ghidra headless candidate) |
+| Web Worker | `src/cart/workers/web.py` | stdlib gate-checked crawler: forms/endpoints, planted-flag hunt (body / HTML comments / HTTP headers), binary-link discovery (`.exe/.bin/.elf/.so/.dll`) with hash registration and task hand-off |
+| Binary Worker | `src/cart/workers/binary.py` | hash-verified static analysis: header parse, strings, planted-flag hunt, unsafe libc function table (`strcpy/gets/system/sprintf/popen/strcat` → `binary_unsafe_function`) |
+| Remediation Advisor | `src/cart/advisor.py` | rule-based plain-English advisories + code/config patches per finding type (build step 9) |
+| Agent Tracer | `src/cart/tracing.py` | span tracing to `traces/agent_traces.jsonl`; optional LangSmith export when `LANGSMITH_API_KEY`/`LANGCHAIN_API_KEY` is set |
 | Verification Service | `src/cart/verify.py` | stub → step 7 |
 | Attack-path Builder | `src/cart/attackpath.py` | stub → step 8 |
 | Report Generator/API | `src/cart/report.py` | stub → step 8 |
@@ -52,6 +54,13 @@ flowchart TD
   the orchestrator owns dedupe keys, budgets, and ordering.
 - Workers communicate exclusively through the shared typed records — never
   free-form chat, never hand-offs of raw shell commands.
+- **Web→Binary agent hand-off:** when the Web Worker crawls a path ending in a
+  binary artefact extension (`.exe .bin .elf .so .dll`), it downloads the file
+  (bounded size cap), saves it locally, computes SHA-256, and registers the
+  local copy with the PolicyGate for **static analysis only** — then the
+  orchestrator `on_binary_discovered` hook enqueues a
+  `binary_static_analysis` task (`owner="binary"`, dedupe key
+  `<run_id>:bin:<path>`). No human intervention after scope lock.
 - Framework decision (LangGraph vs custom runner vs CrewAI) is deliberately
   deferred; the current `orchestrator.py` IS the small custom task-graph
   runner baseline, and the comparative spike can still pick a framework later

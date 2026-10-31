@@ -30,7 +30,14 @@ Properties:
 - **Redirect re-check.** Every web redirect/linked destination is re-validated;
   out-of-scope redirects are blocked and logged, never followed.
 - **Registered binaries only.** The binary worker reads only hash-registered
-  organiser files; hash mismatch = reject + record.
+  organiser files; hash mismatch = reject + record. One auditable exception:
+  files **downloaded by the Web Worker from an already-gate-allowed in-scope
+  URL** (web→binary hand-off) may be registered at run time via
+  `PolicyGate.register_dynamic_binary` and analysed **statically only** (never
+  executed). The locked manifest itself is never mutated by this — the target
+  destination was already authorised, so no scope expansion occurs — and every
+  registration is recorded in the audit log with its reason. Anything else
+  (unregistered, mismatched hash, direct filesystem pick-up) stays DENY.
 - **Immutable scope.** Locked manifest never changes mid-run; new targets
   require a new scope version and re-approval.
 

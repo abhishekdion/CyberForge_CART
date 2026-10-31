@@ -221,6 +221,28 @@ class Orchestrator:
             )
             self.create_task(web_task)
 
+    def on_binary_discovered(
+        self, binary_path: str, source_task: Task | None = None
+    ) -> str:
+        """Web→Binary agent hand-off (judge requirement 2).
+
+        Automatically enqueue a binary_static_analysis task for a binary
+        downloaded by the WebWorker (already hash-registered with the gate).
+        Dedupe key prevents re-enqueueing the same artefact twice per run.
+        """
+        task = Task(
+            task_id=new_id("task"),
+            task_type="binary_static_analysis",
+            owner="binary",
+            target_id=binary_path,
+            status=TaskStatus.READY,
+            ptes_phase=PtesPhase.INTELLIGENCE_GATHERING,
+            parent_task_id=source_task.task_id if source_task else None,
+            dedupe_key=f"{self.run_id}:bin:{binary_path}",
+            budget={"timeout_s": 60, "retries": 1, "max_output": 1 << 20},
+        )
+        return self.create_task(task)
+
     # ------------------------------------------------------------------
     # Scheduling loop
     # ------------------------------------------------------------------

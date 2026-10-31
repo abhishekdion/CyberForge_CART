@@ -31,6 +31,32 @@ already persists task state to SQLite, so recovery is a store query, not a
 framework feature. The comparative spike confirmed no measurable benefit from a
 framework at this stage; worker contracts remain unchanged either way.
 
+## Judge-requirements build — what landed (hackathon feedback)
+
+Four cohesive features were added on top of the build-order baseline; all are
+deterministic, stdlib-first and integrate with the existing task/finding graph:
+
+1. **Planted-flag hunter** — `FLAG_PATTERN` (`flag{...}`, `CTF{...}`,
+   `CyberForge{...}`) applied by the Web Worker to page bodies, HTML comments
+   and HTTP headers, and by the Binary Worker to extracted strings. Findings:
+   `ctf_planted_flag`, severity `high`, always `CANDIDATE` until verified.
+2. **Binary unsafe-function table** — `UNSAFE_FUNCTIONS` (`strcpy`, `gets`,
+   `system`, `sprintf`, `popen`, `strcat`) matched whole-word against binary
+   symbols/strings → `binary_unsafe_function` findings with CWE explanations.
+   Whole-word matching prevents `fgets` false-positives on the `gets` rule.
+3. **Web→Binary agent hand-off** — binary artefact links (`.exe .bin .elf .so
+   .dll`) encountered while crawling are downloaded (bounded `max_binary_bytes`,
+   default 16 MiB), stored under `binary_cache/<run_id>/`, hashed (SHA-256) and
+   registered with the gate for static analysis only. The orchestrator hook
+   `on_binary_discovered` then auto-enqueues `binary_static_analysis`.
+4. **Remediation Advisor + tracing** — `advisor.py` (rule-based patches),
+   `tracing.py` (spans to `traces/agent_traces.jsonl`, optional LangSmith).
+
+Scope-safety notes for feature 3: the destination URL is gate-allowed before
+the fetch, redirects are re-checked, and the download only authorises static
+analysis of the local copy (see the "Registered binaries only" rule in
+`docs/safety.md`). The locked manifest is never mutated.
+
 ## Tier choice (spec section 15) — rationale
 
 CLI supports `--tier` with choices `recon`, `breach`, `deep`. For the initial

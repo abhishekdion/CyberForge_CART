@@ -45,6 +45,9 @@ class PolicyGate:
             ipaddress.ip_network(e, strict=False) for e in manifest.exclusions
         ]
         self._conn: sqlite3.Connection | None = None
+        # In-run downloaded copies of in-scope content (web→binary hand-off).
+        # NEVER writes to the locked manifest; targets themselves never grow.
+        self._dynamic_binaries: dict[str, str] = {}  # path -> sha256
 
     def bind_store(self, conn: sqlite3.Connection) -> None:
         """Attach a live DB connection so record_decision can persist decisions."""
@@ -144,8 +147,35 @@ class PolicyGate:
     # Binary file check
     # ------------------------------------------------------------------
 
+    def register_dynamic_binary(
+        self,
+        path: str,
+        sha256: str,
+        *,
+        reason: str = "",
+        run_id: str | None = None,
+    ) -> None:
+        """Authorise *static analysis only* of a downloaded copy of content
+        that was fetched from an already-authorised, gate-allowed in-scope URL
+        (web→binary hand-off).
+
+        This does NOT touch the locked manifest and does NOT widen the target
+        scope — the destination was already validated. Every registration is
+        recorded in the audit log with the reason.
+        """
+        self._dynamic_binaries[path] = sha256
+        result = ScopeDecisionResult(
+            ScopeDecision.ALLOW,
+            reason or "downloaded copy of in-scope URL content (static analysis only)",
+            path,
+        )
+        self.record_decision(path, result, run_id)
+
     def check_binary_file(self, path: str) -> ScopeDecisionResult:
         sha256 = self.manifest.binary_hashes.get(path)
+        if sha256 is None:
+            # Fall back to in-run downloaded copies (fail closed for anything else)
+            sha256 = self._dynamic_binaries.get(path)
         if sha256 is None:
             return ScopeDecisionResult(
                 ScopeDecision.DENY,

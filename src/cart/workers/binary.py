@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import sqlite3
 import struct
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 from ..models import (
@@ -27,6 +29,52 @@ from ..models import (
 )
 from ..ptes import PtesPhase
 from ..scope import PolicyGate
+
+# ---------------------------------------------------------------------------
+# CTF planted-flag + unsafe libc function detection (judge requirements)
+# ---------------------------------------------------------------------------
+
+FLAG_PATTERN = re.compile(
+    r"(flag\{[^\}]+\}|CTF\{[^\}]+\}|CyberForge\{[^\}]+\})", re.IGNORECASE
+)
+
+UNSAFE_FUNCTIONS = {
+    "strcpy": "Unbounded string copy prone to stack buffer overflow (CWE-120)",
+    "gets": "Inherently dangerous input function with no length limit (CWE-242)",
+    "system": "Command injection vulnerability if user input reaches argument (CWE-78)",
+    "sprintf": "Format string / buffer overflow vulnerability (CWE-134)",
+    "popen": "Process execution prone to command injection (CWE-78)",
+    "strcat": "Unbounded string concatenation prone to buffer overflow (CWE-120)",
+}
+
+UnsafeMatch = dict[str, list[str]]  # function name -> matched strings
+
+
+def scan_flags(text: str | Iterable[str]) -> list[str]:
+    """Return every CTF flag literal found in `text` (or iterable of strings)."""
+    if not isinstance(text, str):
+        text = "\n".join(text)
+    seen: list[str] = []
+    for match in FLAG_PATTERN.findall(text):
+        if match not in seen:
+            seen.append(match)
+    return seen
+
+
+def scan_unsafe_functions(strings: Iterable[str]) -> UnsafeMatch:
+    """Match dangerous libc function names as whole-word symbols/strings.
+
+    Whole-word matching keeps false positives down (e.g. 'fgets' must NOT
+    trigger the 'gets' rule); still, matching against extracted strings or
+    symbol names is a static heuristic, so emitted findings stay CANDIDATE.
+    """
+    triggered: UnsafeMatch = {}
+    for s in strings:
+        for name in UNSAFE_FUNCTIONS:
+            if re.search(rf"\b{re.escape(name)}\b", s):
+                triggered.setdefault(name, []).append(s)
+    return triggered
+
 
 # ---------------------------------------------------------------------------
 # Header parsers (stdlib struct only)
@@ -197,6 +245,38 @@ class BinaryWorker:
         expected = self.gate.manifest.binary_hashes.get(str(path))
         return bool(expected) and expected == self.sha256(path)
 
+    def _get_or_create_asset(self, asset_type: str, canonical_key: str) -> str:
+        """Look up (or create) a binary asset for this run. Dedupe at DB level."""
+        row = self.conn.execute(
+            "SELECT asset_id FROM assets WHERE run_id=? AND asset_type=? AND canonical_key=?",
+            (self.run_id, asset_type, canonical_key),
+        ).fetchone()
+        if row is not None:
+            return row[0]
+
+        from ..models import Asset
+        asset = Asset(
+            asset_id=new_id("asset"),
+            run_id=self.run_id,
+            asset_type=asset_type,
+            canonical_key=canonical_key,
+        )
+        try:
+            self.conn.execute(
+                "INSERT INTO assets (asset_id, run_id, asset_type, canonical_key, first_seen, last_seen) "
+                "VALUES (?,?,?,?,?,?)",
+                (asset.asset_id, asset.run_id, asset.asset_type,
+                 asset.canonical_key, asset.first_seen, asset.last_seen),
+            )
+            self.conn.commit()
+            return asset.asset_id
+        except sqlite3.IntegrityError:
+            row = self.conn.execute(
+                "SELECT asset_id FROM assets WHERE run_id=? AND asset_type=? AND canonical_key=?",
+                (self.run_id, asset_type, canonical_key),
+            ).fetchone()
+            return row[0] if row else asset.asset_id
+
     def run(self, task: Task) -> dict:
         """Static analysis of the binary at task.target_id (file path).
 
@@ -248,8 +328,8 @@ class BinaryWorker:
         else:
             header_info = {"format": fmt}
 
-        # String extraction (bounded)
-        strings = _extract_strings(path, min_length=6, max_strings=200)
+        # String extraction (bounded; min_length=4 so short names like "gets" survive)
+        strings = _extract_strings(path, min_length=4, max_strings=200)
 
         # Interesting string heuristics → CANDIDATE findings
         finding_ids = self._emit_string_findings(task, path, strings, header_info)
@@ -272,36 +352,7 @@ class BinaryWorker:
         self, task: Task, path: Path, strings: list[str], header_info: dict
     ) -> list[str]:
         """Look for interesting patterns in extracted strings → CANDIDATE findings."""
-        # Look up or create a binary asset for this path
-        row = self.conn.execute(
-            "SELECT asset_id FROM assets WHERE run_id=? AND asset_type='binary' AND canonical_key=?",
-            (self.run_id, str(path)),
-        ).fetchone()
-        if row is None:
-            from ..models import Asset
-            asset = Asset(
-                asset_id=new_id("asset"),
-                run_id=self.run_id,
-                asset_type="binary",
-                canonical_key=str(path),
-            )
-            try:
-                self.conn.execute(
-                    "INSERT INTO assets (asset_id, run_id, asset_type, canonical_key, first_seen, last_seen) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (asset.asset_id, asset.run_id, asset.asset_type,
-                     asset.canonical_key, asset.first_seen, asset.last_seen),
-                )
-                self.conn.commit()
-                asset_id = asset.asset_id
-            except sqlite3.IntegrityError:
-                row = self.conn.execute(
-                    "SELECT asset_id FROM assets WHERE run_id=? AND asset_type='binary' AND canonical_key=?",
-                    (self.run_id, str(path)),
-                ).fetchone()
-                asset_id = row[0] if row else new_id("asset")
-        else:
-            asset_id = row[0]
+        asset_id = self._get_or_create_asset("binary", str(path))
 
         finding_ids: list[str] = []
         interesting_patterns = {
@@ -326,28 +377,105 @@ class BinaryWorker:
                 f"{len(matches)} string(s) matching '{category}' pattern. "
                 f"Examples: {matches[:3]}"
             )
-            finding = Finding(
-                finding_id=new_id("find"),
-                asset_id=asset_id,
-                finding_type=f"binary_{category}",
-                severity=severity,
-                status=FindingStatus.CANDIDATE,
-                confidence="low",
-                ptes_phase=PtesPhase.INTELLIGENCE_GATHERING,
-                summary=summary,
+            finding_ids.append(
+                self._emit_finding_with_evidence(
+                    asset_id=asset_id,
+                    finding_type=f"binary_{category}",
+                    severity=severity,
+                    ptes_phase=PtesPhase.INTELLIGENCE_GATHERING,
+                    summary=summary,
+                    confidence="low",
+                    source_tool="binary_static_analysis",
+                    artifact_path=str(path),
+                    file_hash=self.sha256(path),
+                    excerpt=json.dumps(matches[:10])[:500],
+                    verification_method="manual_review_required",
+                )
             )
-            fid = _persist_finding(self.conn, finding)
 
-            evidence = Evidence(
-                evidence_id=new_id("evid"),
-                finding_id=fid,
-                source_tool="binary_static_analysis",
-                artifact_path=str(path),
-                hash=self.sha256(path),
-                excerpt=json.dumps(matches[:10])[:500],
-                verification_method="manual_review_required",
+        # ---------------- CTF planted-flag hunt (judge requirement 1) -------
+        flags = scan_flags(strings)
+        if flags:
+            finding_ids.append(
+                self._emit_finding_with_evidence(
+                    asset_id=asset_id,
+                    finding_type="ctf_planted_flag",
+                    severity="high",
+                    ptes_phase=PtesPhase.INTELLIGENCE_GATHERING,
+                    summary=(
+                        f"Planted CTF flag captured in binary {path.name} strings: "
+                        f"{flags}"
+                    ),
+                    confidence="high",
+                    source_tool="binary_static_analysis",
+                    artifact_path=str(path),
+                    file_hash=self.sha256(path),
+                    excerpt=json.dumps(flags)[:500],
+                    verification_method="manual_review_required",
+                )
             )
-            _persist_evidence(self.conn, evidence)
-            finding_ids.append(fid)
+
+        # ---------------- Unsafe libc functions (judge requirement 1) -------
+        triggered_unsafe = scan_unsafe_functions(strings)
+        for func_name, matches in triggered_unsafe.items():
+            explanation = UNSAFE_FUNCTIONS[func_name]
+            finding_ids.append(
+                self._emit_finding_with_evidence(
+                    asset_id=asset_id,
+                    finding_type="binary_unsafe_function",
+                    severity="high",
+                    ptes_phase=PtesPhase.INTELLIGENCE_GATHERING,
+                    summary=(
+                        f"Binary {path.name} [{header_info.get('arch', header_info.get('format', '?'))}]: "
+                        f"unsafe C function '{func_name}' found. {explanation}. "
+                        f"Matched strings: {matches[:3]}"
+                    ),
+                    confidence="medium",
+                    source_tool="binary_static_analysis",
+                    artifact_path=str(path),
+                    file_hash=self.sha256(path),
+                    excerpt=json.dumps({"function": func_name, "matches": matches[:5]})[:500],
+                    verification_method="manual_review_required",
+                )
+            )
 
         return finding_ids
+
+    def _emit_finding_with_evidence(
+        self,
+        asset_id: str,
+        finding_type: str,
+        severity: str,
+        ptes_phase: str,
+        summary: str,
+        confidence: str,
+        source_tool: str,
+        artifact_path: str,
+        file_hash: str,
+        excerpt: str,
+        verification_method: str,
+    ) -> str:
+        """Create a CANDIDATE finding + evidence under it. Never auto-confirms."""
+        finding = Finding(
+            finding_id=new_id("find"),
+            asset_id=asset_id,
+            finding_type=finding_type,
+            severity=severity,
+            status=FindingStatus.CANDIDATE,
+            confidence=confidence,
+            ptes_phase=ptes_phase,
+            summary=summary,
+        )
+        fid = _persist_finding(self.conn, finding)
+
+        evidence = Evidence(
+            evidence_id=new_id("evid"),
+            finding_id=fid,
+            source_tool=source_tool,
+            artifact_path=artifact_path,
+            hash=file_hash,
+            excerpt=excerpt,
+            verification_method=verification_method,
+        )
+        _persist_evidence(self.conn, evidence)
+        return fid
