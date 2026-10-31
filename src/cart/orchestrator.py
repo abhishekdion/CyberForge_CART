@@ -195,15 +195,29 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def on_host_discovered(self, asset_id: str, is_web: bool) -> None:
-        """Emit follow-up tasks for a discovered host."""
+        """Emit follow-up tasks for a discovered host.
+
+        port_service_discovery targets the canonical IP (network gate parses
+        IPs/CIDRs); web_crawl_endpoint_discovery targets the asset_id so the
+        WebWorker can resolve asset→IP via the store lookup.
+        """
+        # Resolve canonical IP from asset_id so the network gate can parse it.
+        row = self.conn.execute(
+            "SELECT canonical_key FROM assets WHERE asset_id=? AND run_id=?",
+            (asset_id, self.run_id),
+        ).fetchone()
+        if not row:
+            return  # asset not found; skip fan-out
+        canonical_ip = row[0]
+
         port_task = Task(
             task_id=new_id("task"),
             task_type="port_service_discovery",
             owner="network",
-            target_id=asset_id,
+            target_id=canonical_ip,
             status=TaskStatus.READY,
             ptes_phase=PtesPhase.INTELLIGENCE_GATHERING,
-            dedupe_key=f"{self.run_id}:port:{asset_id}",
+            dedupe_key=f"{self.run_id}:port:{canonical_ip}",
             budget={"timeout_s": 120, "retries": 2, "max_output": 1 << 20},
         )
         self.create_task(port_task)
