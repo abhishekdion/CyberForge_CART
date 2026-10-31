@@ -49,9 +49,11 @@ set, and the PolicyGate can resolve every target. The operator hits start;
 
 ### Phase D — Network discovery
 The Network Worker finds live hosts, ports, and services **inside the locked
-scope only**, normalises tool output (Nmap XML adapter), and writes canonical
-asset/service records to the shared store. It raises follow-up tasks; it does
-not decide to attack anything.
+scope only**, using Nmap XML adapter when available or falling back to a pure
+stdlib non-blocking TCP socket scan (zero external dependencies) if nmap is
+missing or fails at runtime. Output normalises to canonical asset/service
+records written to the shared store. It raises follow-up tasks; it does not
+decide to attack anything.
 
 ### Phase E — Parallel specialist assessment
 The orchestrator schedules independent work simultaneously: Web Worker tasks
@@ -95,7 +97,10 @@ e.g. bounded `fgets`/`snprintf` replacements for unsafe libc functions,
 parameterised queries + CSRF for form endpoints, secret-manager guidance for
 hard-coded credentials). Agent task execution is traced as spans to
 `traces/agent_traces.jsonl` by `src/cart/tracing.py` (optional LangSmith
-export when `LANGSMITH_API_KEY` is set).
+export when `LANGSMITH_API_KEY` is set). After report generation,
+`RemediationAdvisor.export_patches()` writes ready-to-apply `.patch` files
+(git unified diff format, verified with `git apply --check`) for every CONFIRMED
+finding mapped to a hardening group into `reports/patches/`.
 
 ## What is autonomous, precisely
 

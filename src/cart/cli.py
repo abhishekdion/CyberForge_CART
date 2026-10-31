@@ -27,6 +27,7 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:  # noqa: S110 BLE001
         pass
 
+from .advisor import RemediationAdvisor
 from .models import (
     FindingStatus,
     RunStatus,
@@ -234,12 +235,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
     # Initialize Workers
-    try:
-        net_worker = NetworkWorker(conn=conn, gate=gate, run_id=run_id)
-    except Exception as exc:  # noqa: BLE001
-        print(f"Warning: NetworkWorker init (nmap): {exc}")
-        net_worker = None
-
+    net_worker = NetworkWorker(conn=conn, gate=gate, run_id=run_id)
     web_worker = WebWorker(conn=conn, gate=gate, run_id=run_id)
     bin_worker = BinaryWorker(conn=conn, gate=gate, run_id=run_id)
 
@@ -274,8 +270,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     def dispatch_worker(task: Task) -> dict:
         print(f"[*] Executing task {task.task_id} [{task.task_type}] on target {task.target_id}")
         if task.owner == "network":
-            if net_worker is None:
-                raise RuntimeError("Network worker not available (nmap missing)")
             return net_worker.run(task)
         elif task.owner == "web":
             return web_worker.run(task)
@@ -326,6 +320,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     print("\n[*] Generating Consolidated Assessment Report...")
     reporter = ReportGenerator(conn=conn, output_dir=args.report_dir)
     report_info = reporter.generate(run_id=run_id)
+
+    # Generate executable git-appliable patches for every confirmed finding
+    advisor = RemediationAdvisor(conn)
+    try:
+        patch_paths = advisor.export_patches(output_dir=str(Path(args.report_dir) / "patches"))
+        if patch_paths:
+            print(f"[*] Remediation patches written: {len(patch_paths)} file(s) -> {Path(args.report_dir).joinpath('patches')}/")
+            for p in patch_paths:
+                print(f"    {Path(p).name}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[*] Remediation patch generation skipped: {exc}")
 
     print("\n" + "=" * 60)
     print("✅ Assessment Completed!")

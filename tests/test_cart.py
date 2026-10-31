@@ -536,6 +536,23 @@ class TestRemediationAdvisor(unittest.TestCase):
             self.advisor.advise("f_missing")
 
 
+    def test_export_patches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._insert_finding("f_conf", "binary_unsafe_function", "high", "unsafe strcpy")
+            self.conn.execute("UPDATE findings SET status = 'confirmed' WHERE finding_id = 'f_conf'")
+            self.conn.commit()
+            patch_files = self.advisor.export_patches(output_dir=tmpdir)
+            self.assertEqual(len(patch_files), 1)
+            self.assertTrue(Path(patch_files[0]).exists())
+            content = Path(patch_files[0]).read_text(encoding="utf-8")
+            # Real git unified diff: starts with diff header, contains index with
+            # a 10-char SHA-1 hash, and new-file mode line.
+            self.assertIn("diff --git", content)
+            self.assertIn("new file mode 100644", content)
+            self.assertIn("index ", content)
+            self.assertIn("+/* safe_io.h", content)
+
+
 class TestAgentTracer(unittest.TestCase):
     """Judge requirement 4: span logging to disk, never raising."""
 
@@ -639,6 +656,30 @@ class TestUIDashboard(unittest.TestCase):
             gdata = json.loads(handler.wfile.getvalue())
             self.assertIn("nodes", gdata)
             self.assertIn("edges", gdata)
+
+            # Test _handle_flags
+            handler.wfile = io.BytesIO()
+            handler._handle_flags()
+            flags = json.loads(handler.wfile.getvalue())
+            self.assertIsInstance(flags, list)
+
+            # Test _handle_agents
+            handler.wfile = io.BytesIO()
+            handler._handle_agents()
+            agents = json.loads(handler.wfile.getvalue())
+            self.assertEqual(len(agents), 5)
+
+            # Test _handle_asset_detail
+            handler.wfile = io.BytesIO()
+            handler._handle_asset_detail("id=a_ui")
+            detail = json.loads(handler.wfile.getvalue())
+            self.assertEqual(detail["canonical_key"], "10.0.0.1")
+
+            # Test _handle_patches
+            handler.wfile = io.BytesIO()
+            handler._handle_patches()
+            patches = json.loads(handler.wfile.getvalue())
+            self.assertIn("patches", patches)
 
 
 if __name__ == "__main__":

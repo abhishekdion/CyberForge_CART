@@ -26,7 +26,8 @@ python -m venv .venv
 ```
 
 Judge path (target, not yet implemented): install prerequisites →
-**one launch command** → organiser selects the lab → start → one final report.
+**one launch command** → organiser selects the lab → start → one final report +
+git-appliable `.patch` files in `reports/patches/`.
 
 ## How it works (the short version)
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 
 from .models import Evidence, FindingStatus, new_id
@@ -86,6 +87,48 @@ def _playbook_binary_debug_artifact(
     )
 
 
+def _playbook_ctf_planted_flag(
+    finding: dict, evidence_list: list[dict]
+) -> tuple[FindingStatus, str, str]:
+    """Planted CTF flags are genuine: CONFIRMED if excerpt contains a flag literal."""
+    for ev in evidence_list:
+        excerpt = ev.get("excerpt", "")
+        if re.search(
+            r"flag\{[^\}]+\}|CTF\{[^\}]+\}|CyberForge\{[^\}]+\}",
+            excerpt,
+            re.IGNORECASE,
+        ):
+            return (
+                FindingStatus.CONFIRMED,
+                "high",
+                "Planted CTF flag literal confirmed in evidence",
+            )
+    return FindingStatus.INCONCLUSIVE, "low", "No flag literal found in evidence"
+
+
+def _playbook_binary_unsafe_function(
+    finding: dict, evidence_list: list[dict]
+) -> tuple[FindingStatus, str, str]:
+    """Unsafe libc functions are genuine: CONFIRMED if excerpt names a known unsafe func."""
+    _UNSAFE_FUNCTIONS = {"strcpy", "gets", "system", "sprintf", "popen", "strcat"}
+    for ev in evidence_list:
+        try:
+            data = json.loads(ev.get("excerpt", "{}"))
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if isinstance(data, dict) and data.get("function") in _UNSAFE_FUNCTIONS:
+            return (
+                FindingStatus.CONFIRMED,
+                "medium",
+                f"Unsafe function {data['function']!r} confirmed in static analysis output",
+            )
+    return (
+        FindingStatus.NEEDS_REVIEW,
+        "low",
+        "Unsafe-function evidence requires manual review to confirm",
+    )
+
+
 def _playbook_default(
     finding: dict, evidence_list: list[dict]
 ) -> tuple[FindingStatus, str, str]:
@@ -104,6 +147,8 @@ _PLAYBOOKS: dict[str, object] = {
     "binary_hardcoded_credential": _playbook_binary_hardcoded_credential,
     "binary_network_indicator": _playbook_binary_network_indicator,
     "binary_debug_artifact": _playbook_binary_debug_artifact,
+    "ctf_planted_flag": _playbook_ctf_planted_flag,
+    "binary_unsafe_function": _playbook_binary_unsafe_function,
 }
 
 

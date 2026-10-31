@@ -1,17 +1,27 @@
 """Network specialist (spec section 5.5, PRD FR-1).
 
-Nmap-based host/port/service discovery. All targets must pass PolicyGate
-before any packet is sent. Output is normalised to canonical Asset + Service
-records. Never decides to attack — only discovers and proposes follow-up tasks.
+Host/port/service discovery with two interchangeable engines:
+- Nmap XML adapter when nmap ≥ 7 is available.
+- Pure stdlib non-blocking TCP connect(2) scanner fallback (zero external
+  dependencies) when nmap is missing — or as an automatic downgrade if nmap
+  fails at runtime.
+
+All targets must pass PolicyGate before any packet is sent; output is
+normalised to canonical Asset + Service records. This worker never decides to
+attack — it only discovers and proposes follow-up tasks.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
+import ipaddress
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -29,25 +39,37 @@ from ..scope import PolicyGate, ScopeDecisionResult
 # Minimum supported Nmap version
 _MIN_NMAP_MAJOR = 7
 
+# Common TCP ports catalog for native socket fallback
+_COMMON_PORTS: list[int] = [
+    21, 22, 23, 25, 53, 80, 88, 110, 135, 139, 143, 443, 445, 993, 995,
+    1433, 1521, 3306, 3389, 5432, 5900, 6379, 8000, 8080, 8443, 8888, 9000, 27017,
+]
 
-def _check_nmap() -> str:
-    """Return path to nmap binary or raise RuntimeError."""
+_PORT_SERVICE_MAP: dict[int, str] = {
+    21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "domain",
+    80: "http", 88: "kerberos", 110: "pop3", 135: "msrpc", 139: "netbios-ssn",
+    143: "imap", 443: "https", 445: "microsoft-ds", 993: "imaps", 995: "pop3s",
+    1433: "ms-sql-s", 1521: "oracle", 3306: "mysql", 3389: "ms-wbt-server",
+    5432: "postgresql", 5900: "vnc", 6379: "redis", 8000: "http", 8080: "http-proxy",
+    8443: "https-alt", 8888: "http", 9000: "http", 27017: "mongodb",
+}
+
+
+def _check_nmap() -> str | None:
+    """Return path to nmap binary, or None if not installed."""
     nmap = shutil.which("nmap")
     if nmap is None:
-        raise RuntimeError(
-            "nmap not found in PATH. Install nmap >= 7 and ensure it is on PATH."
-        )
+        return None
     try:
         out = subprocess.run(
             [nmap, "--version"], check=False, capture_output=True, text=True, timeout=10
         ).stdout
-        # "Nmap 7.94 ..."
         import re
         m = re.search(r"Nmap (\d+)\.", out)
         if m and int(m.group(1)) < _MIN_NMAP_MAJOR:
-            raise RuntimeError(f"nmap version too old: {out.splitlines()[0]}")
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"nmap not executable: {exc}") from exc
+            return None
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
     return nmap
 
 
@@ -187,6 +209,123 @@ def _persist_tool_event(conn: sqlite3.Connection, event: ToolEvent) -> None:
     conn.commit()
 
 
+def _probe_tcp_port(ip: str, port: int, timeout_s: float = 0.4) -> bool:
+    """Single TCP connect_ex probe (non-blocking, OS-level connect timeout)."""
+    return _connect_probe(ip, port, timeout_s, grab_banner=False)[0]
+
+
+def _connect_probe(
+    ip: str, port: int, timeout_s: float = 0.4, grab_banner: bool = False
+) -> tuple[bool, str]:
+    """One TCP connect via socket.connect_ex + optional passive banner read.
+
+    The connect is bounded by the socket timeout (never blocks indefinitely).
+    Banner harvesting is *passive*: we read what the service itself sends and
+    never transmit any payload — discovery-grade, non-destructive behaviour.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout_s)
+            if s.connect_ex((ip, port)) != 0:
+                return False, ""
+            if not grab_banner:
+                return True, ""
+            try:
+                data = s.recv(120)
+            except (TimeoutError, OSError):
+                data = b""
+        banner = "".join(chr(b) if 0x20 <= b < 0x7F else " " for b in data).strip()
+        return True, banner[:80]
+    except Exception:  # noqa: BLE001 - unreachable/refused host: not open
+        return False, ""
+
+
+def _scan_native_sockets(
+    target: str,
+    gate: PolicyGate,
+    run_id: str,
+    *,
+    ports: list[int] | None = None,
+    max_workers: int = 64,
+    deadline: float | None = None,
+) -> tuple[list[Asset], list[Service]]:
+    """Pure stdlib multi-threaded TCP scanner (zero external dependencies).
+
+    Builds one bounded, non-blocking connect_ex job per (allowed host × port),
+    executes them all through a single ThreadPoolExecutor, and applies every
+    PolicyGate rule before submission — exclusions and DENY always win, and
+    each decision is audit-logged via the gate. Results normalise to the
+    canonical Asset + Service records used by the Nmap path so downstream
+    fan-out (web tasks, detail UI) behaves identically.
+    """
+    try:
+        net = ipaddress.ip_network(target, strict=False)
+        hosts = list(net.hosts()) or [net.network_address]
+    except ValueError:
+        return [], []
+
+    port_list = list(ports) if ports is not None else list(_COMMON_PORTS)
+
+    # Gate-per-IP up front (audit-logged); only allowed hosts generate jobs
+    allowed_ips: list[str] = []
+    for host in hosts[:256]:
+        decision = gate.gate(str(host), run_id)
+        if decision.decision is ScopeDecision.ALLOW:
+            allowed_ips.append(str(host))
+
+    jobs: list[tuple[str, int]] = [
+        (ip, port) for ip in allowed_ips for port in port_list
+    ]
+    if not jobs:
+        return [], []
+
+    open_detail: dict[str, dict[int, str]] = {}
+    pool_size = max(1, min(max_workers, len(jobs)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as pool:
+        futures = {
+            pool.submit(_connect_probe, ip, port, 0.4, grab_banner=True): (ip, port)
+            for ip, port in jobs
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            if deadline is not None and time.monotonic() > deadline:
+                # Run budget expired — abandon the remaining probes cleanly.
+                for pending in futures:
+                    pending.cancel()
+                break
+            ip, port = futures[fut]
+            try:
+                is_open, banner = fut.result()
+            except Exception:  # noqa: BLE001 - failed probe = not open
+                is_open, banner = False, ""
+            if is_open:
+                open_detail.setdefault(ip, {})[port] = banner
+
+    assets: list[Asset] = []
+    services: list[Service] = []
+    for ip in sorted(open_detail):
+        asset = Asset(
+            asset_id=new_id("asset"),
+            run_id=run_id,
+            asset_type="host",
+            canonical_key=ip,
+        )
+        assets.append(asset)
+        for port in sorted(open_detail[ip]):
+            banner = open_detail[ip][port]
+            services.append(
+                Service(
+                    service_id=new_id("svc"),
+                    asset_id=asset.asset_id,
+                    protocol="tcp",
+                    port=port,
+                    service_name=_PORT_SERVICE_MAP.get(port, "unknown"),
+                    version=banner,
+                    state="open",
+                )
+            )
+    return assets, services
+
+
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
@@ -202,6 +341,37 @@ class NetworkWorker:
         self.gate = gate
         self.run_id = run_id
         self._nmap = _check_nmap()
+
+    def _run_native_scan(
+        self, task: Task, scope_decision: ScopeDecision | None = None
+    ) -> tuple[list[Asset], list[Service]]:
+        """Run the native scanner with a fresh, audited tool event.
+
+        Re-passes the already-computed scope decision when available so the
+        audit trail records exactly one allow/deny decision per target.
+        """
+        timeout_s = task.budget.get("timeout_s", 300)
+        if scope_decision is None:
+            scope_decision = self.gate.gate(task.target_id, self.run_id).decision
+        event = ToolEvent(
+            event_id=new_id("evt"),
+            task_id=task.task_id,
+            tool="native_tcp_scanner",
+            target=task.target_id,
+            scope_decision=scope_decision,
+            started_at=utc_now(),
+        )
+        deadline = time.monotonic() + timeout_s
+        assets, services = _scan_native_sockets(
+            task.target_id, self.gate, self.run_id, deadline=deadline
+        )
+        event.finished_at = utc_now()
+        event.exit_status = "0"
+        event.output_hash = hashlib.sha256(
+            f"{len(assets)}:{len(services)}".encode()
+        ).hexdigest()
+        _persist_tool_event(self.conn, event)
+        return assets, services
 
     def run(self, task: Task) -> dict:
         """Execute host + port discovery for task.target_id (an IP/CIDR).
@@ -227,48 +397,62 @@ class NetworkWorker:
             _persist_tool_event(self.conn, event)
             raise PermissionError(f"Scope DENY for target {target!r}: {result.reason}")
 
-        # Run Nmap — host discovery first, then service scan
-        with tempfile.TemporaryDirectory() as tmpdir:
-            xml_path = Path(tmpdir) / "scan.xml"
-            nmap_args = [
-                "-sV",            # version detection
-                "--open",         # only open ports
-                "-T4",            # aggressive timing (lab environment)
-                "--max-retries", "2",
-                "--host-timeout", str(task.budget.get("timeout_s", 120)) + "s",
-                "-oX", str(xml_path),
-                target,
-            ]
+        # Choose scanner: Nmap if available, otherwise native TCP sockets.
+        # If Nmap is present but fails at runtime, degrade to native sockets
+        # seamlessly — with a failed tool event recorded for the audit trail.
+        if self._nmap is not None:
             try:
-                xml_bytes = _run_nmap(self._nmap, nmap_args, timeout=task.budget.get("timeout_s", 300))
-                if xml_path.exists():
-                    xml_bytes = xml_path.read_bytes()
-            except RuntimeError as exc:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    xml_path = Path(tmpdir) / "scan.xml"
+                    nmap_args = [
+                        "-sV",            # version detection
+                        "--open",         # only open ports
+                        "-T4",            # aggressive timing (lab environment)
+                        "--max-retries", "2",
+                        "--host-timeout", str(task.budget.get("timeout_s", 120)) + "s",
+                        "-oX", str(xml_path),
+                        target,
+                    ]
+                    xml_bytes = _run_nmap(
+                        self._nmap,
+                        nmap_args,
+                        timeout=task.budget.get("timeout_s", 300),
+                    )
+                    if xml_path.exists():
+                        xml_bytes = xml_path.read_bytes()
+
+                output_hash = _sha256_bytes(xml_bytes)
+                event.finished_at = utc_now()
+                event.exit_status = "0"
+                event.output_hash = output_hash
+                _persist_tool_event(self.conn, event)
+
+                # Normalise XML
+                assets, services = _parse_nmap_xml(xml_bytes, self.run_id)
+            except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
                 event.finished_at = utc_now()
                 event.exit_status = f"error:{exc}"
                 _persist_tool_event(self.conn, event)
-                raise
-
-        output_hash = _sha256_bytes(xml_bytes)
-        event.finished_at = utc_now()
-        event.exit_status = "0"
-        event.output_hash = output_hash
-        _persist_tool_event(self.conn, event)
-
-        # Normalise XML
-        assets, services = _parse_nmap_xml(xml_bytes, self.run_id)
+                # Seamless degradation: retry discovery with native sockets
+                assets, services = self._run_native_scan(
+                    task, scope_decision=result.decision
+                )
+        else:
+            # Native socket scan fallback
+            assets, services = self._run_native_scan(
+                task, scope_decision=result.decision
+            )
 
         # Persist + track web assets
         web_asset_ids: list[str] = []
+        asset_by_id = {a.asset_id: a for a in assets}
         for asset in assets:
-            actual_id = _persist_asset(self.conn, asset)
-            asset.asset_id = actual_id  # update for service FK
+            _persist_asset(self.conn, asset)
 
         for svc in services:
-            # Re-map asset_id to persisted value
-            for asset in assets:
-                if svc.asset_id == asset.asset_id:
-                    break
+            asset = asset_by_id.get(svc.asset_id)
+            if asset is None:
+                continue  # service references an asset this scan did not emit
             _persist_service(self.conn, svc)
             if svc.port in _WEB_PORTS:
                 # Scope-check the specific web service before marking web

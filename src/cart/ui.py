@@ -3,11 +3,12 @@
 Serves an interactive dark-mode control page on localhost using Python's
 built-in http.server. Reads live telemetry directly from SQLite (cart.db)
 and allows organisers and judges to inspect:
-- Candidate networks and scope lock status
+- Multi-agent live coordination status (Network, Web, Binary, Verifier, Advisor)
+- Captured CTF flags trophy case (flag{...}, CyberForge{...})
 - Live worker concurrency and PRD compliance metrics
 - Real-time PolicyGate audit logs (proving 0 out-of-scope probes)
-- Interactive visual attack path graph (SVG)
-- Consolidated Markdown report
+- Interactive visual attack path graph (SVG) with click-to-inspect nodes
+- Consolidated Markdown report & downloadable code patches
 """
 
 from __future__ import annotations
@@ -15,51 +16,49 @@ from __future__ import annotations
 import http.server
 import json
 import sqlite3
-import threading
 import urllib.parse
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .advisor import RemediationAdvisor
 from .attackpath import AttackPathBuilder
-from .models import FindingStatus, RunStatus, new_id, utc_now
 from .preflight import list_candidate_networks
 from .report import ReportGenerator
 from .store import connect
-
 
 _INDEX_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CyberForge CART — Control Console</title>
+<title>CyberForge CART — Live Autonomous Operations</title>
 <style>
 :root {
-  --bg: #0b0f19;
-  --panel: #111827;
-  --panel-border: #1f2937;
+  --bg: #070a13;
+  --panel: #0d1322;
+  --panel-border: #1a233a;
   --text: #e5e7eb;
-  --text-muted: #9ca3af;
+  --text-muted: #8892b0;
   --accent: #00f0ff;
-  --accent-glow: rgba(0, 240, 255, 0.2);
+  --accent-glow: rgba(0, 240, 255, 0.25);
+  --gold: #f59e0b;
+  --gold-glow: rgba(245, 158, 11, 0.25);
   --green: #10b981;
   --red: #ef4444;
-  --amber: #f59e0b;
   --purple: #8b5cf6;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }
 body { background: var(--bg); color: var(--text); padding: 1.5rem; line-height: 1.5; }
-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--panel-border); padding-bottom: 1rem; margin-bottom: 1.5rem; }
+header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--panel-border); padding-bottom: 1rem; margin-bottom: 1.2rem; }
 .logo { font-size: 1.4rem; font-weight: 800; letter-spacing: 1px; color: #fff; display: flex; align-items: center; gap: 0.6rem; }
 .logo span { color: var(--accent); }
 .badge { font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 9999px; text-transform: uppercase; font-weight: 700; }
 .badge-running { background: rgba(16, 185, 129, 0.2); color: var(--green); border: 1px solid var(--green); }
-.badge-partial { background: rgba(245, 158, 11, 0.2); color: var(--amber); border: 1px solid var(--amber); }
+.badge-partial { background: rgba(245, 158, 11, 0.2); color: var(--gold); border: 1px solid var(--gold); }
 .badge-completed { background: rgba(0, 240, 255, 0.2); color: var(--accent); border: 1px solid var(--accent); }
 .badge-idle { background: rgba(156, 163, 175, 0.2); color: var(--text-muted); border: 1px solid var(--text-muted); }
 
-.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 1rem; margin-bottom: 1.2rem; }
 .col-3 { grid-column: span 3; }
 .col-4 { grid-column: span 4; }
 .col-6 { grid-column: span 6; }
@@ -71,18 +70,31 @@ header { display: flex; justify-content: space-between; align-items: center; bor
 .metric-val { font-size: 1.8rem; font-weight: 800; color: #fff; margin-bottom: 0.2rem; }
 .metric-sub { font-size: 0.75rem; color: var(--text-muted); }
 
+/* Trophy Case */
+.trophy-case { background: linear-gradient(135deg, rgba(245, 158, 11, 0.08) 0%, rgba(13, 19, 34, 0.8) 100%); border: 1px solid var(--gold); box-shadow: 0 0 15px var(--gold-glow); border-radius: 8px; padding: 1rem; margin-bottom: 1.2rem; }
+.flag-chip { display: inline-flex; align-items: center; gap: 0.5rem; background: rgba(245, 158, 11, 0.15); border: 1px solid var(--gold); color: #fff; padding: 0.3rem 0.8rem; border-radius: 6px; font-family: monospace; font-size: 0.9rem; font-weight: 700; margin: 0.3rem; }
+.flag-meta { font-size: 0.65rem; font-weight: 400; color: var(--gold); opacity: 0.85; font-family: system-ui, sans-serif; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-copy { background: var(--gold); color: #000; border: none; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.7rem; font-weight: bold; cursor: pointer; }
+
+/* Multi-Agent Strip */
+.agent-strip { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.75rem; margin-bottom: 1.2rem; }
+.agent-card { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 6px; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.3rem; }
+.agent-name { font-size: 0.8rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 0.4rem; }
+.agent-role { font-size: 0.7rem; color: var(--text-muted); }
+.agent-stat { font-size: 0.75rem; font-weight: 600; color: var(--accent); }
+
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--panel-border); }
 th { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; }
 tr:last-child td { border-bottom: none; }
 
-.log-box { font-family: Consolas, monospace; font-size: 0.8rem; height: 260px; overflow-y: auto; background: #070a13; padding: 0.75rem; border-radius: 4px; border: 1px solid #1a2234; }
+.log-box { font-family: Consolas, monospace; font-size: 0.8rem; height: 260px; overflow-y: auto; background: #05080f; padding: 0.75rem; border-radius: 4px; border: 1px solid #141c2e; }
 .log-line { margin-bottom: 0.3rem; }
 .log-deny { color: var(--red); }
 .log-allow { color: var(--green); }
 .log-meta { color: var(--text-muted); }
 
-.graph-container { width: 100%; height: 320px; background: #070a13; border: 1px solid #1a2234; border-radius: 6px; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; }
+.graph-container { width: 100%; height: 320px; background: #05080f; border: 1px solid #141c2e; border-radius: 6px; overflow: hidden; display: flex; align-items: center; justify-content: center; position: relative; }
 svg { width: 100%; height: 100%; }
 
 button { background: var(--accent); color: #000; border: none; padding: 0.5rem 1rem; border-radius: 4px; font-weight: 700; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
@@ -90,7 +102,11 @@ button:hover { background: #38f9d7; box-shadow: 0 0 12px var(--accent-glow); }
 button.btn-sec { background: transparent; border: 1px solid var(--panel-border); color: var(--text); }
 button.btn-sec:hover { background: var(--panel-border); }
 
-pre.report-pre { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 0.8rem; background: #070a13; padding: 1rem; border-radius: 6px; max-height: 400px; overflow-y: auto; }
+pre.report-pre { white-space: pre-wrap; font-family: Consolas, monospace; font-size: 0.8rem; background: #05080f; padding: 1rem; border-radius: 6px; max-height: 400px; overflow-y: auto; }
+
+/* Modal Drawer */
+.modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; }
+.modal-content { background: var(--panel); border: 1px solid var(--accent); border-radius: 8px; width: 550px; max-width: 90%; max-height: 80vh; overflow-y: auto; padding: 1.5rem; box-shadow: 0 0 20px var(--accent-glow); }
 </style>
 </head>
 <body>
@@ -102,9 +118,47 @@ pre.report-pre { white-space: pre-wrap; font-family: Consolas, monospace; font-s
   </div>
   <div style="display:flex; gap:0.5rem; align-items:center;">
     <span id="run-timer" style="font-family:monospace; font-size:0.9rem; color:var(--text-muted);">00:00:00</span>
+    <button onclick="downloadPatches()" class="btn-sec" style="color:var(--accent); border-color:var(--accent);">💾 Export Patches</button>
     <button onclick="refreshData()" class="btn-sec">↻ Refresh</button>
   </div>
 </header>
+
+<!-- Multi-Agent Live Coordination Strip -->
+<div class="agent-strip" id="agents-strip">
+  <div class="agent-card">
+    <div class="agent-name">🌐 Network Specialist</div>
+    <div class="agent-role">Host & Port Discovery</div>
+    <div class="agent-stat">0 Active / 0 Done</div>
+  </div>
+  <div class="agent-card">
+    <div class="agent-name">🕷️ Web Specialist</div>
+    <div class="agent-role">Endpoints & Form Crawler</div>
+    <div class="agent-stat">0 Active / 0 Done</div>
+  </div>
+  <div class="agent-card">
+    <div class="agent-name">⚙️ Binary Specialist</div>
+    <div class="agent-role">Static Analysis & Unsafe Libc</div>
+    <div class="agent-stat">0 Active / 0 Done</div>
+  </div>
+  <div class="agent-card">
+    <div class="agent-name">🛡️ Verification Service</div>
+    <div class="agent-role">Deterministic Playbooks</div>
+    <div class="agent-stat">0 Confirmed</div>
+  </div>
+  <div class="agent-card">
+    <div class="agent-name">💡 Remediation Advisor</div>
+    <div class="agent-role">Plain-English Patches</div>
+    <div class="agent-stat">0 Patches Ready</div>
+  </div>
+</div>
+
+<!-- Planted CTF Flags Trophy Case -->
+<div class="trophy-case" id="trophy-case" style="display:none;">
+  <div style="font-size:0.85rem; font-weight:800; color:var(--gold); display:flex; align-items:center; gap:0.4rem; margin-bottom:0.5rem;">
+    🚩 CAPTURED CTF PLANTED FLAGS (<span id="flag-count">0</span>)
+  </div>
+  <div id="flag-chips-list"></div>
+</div>
 
 <!-- PRD Metrics Summary -->
 <div class="grid">
@@ -136,7 +190,7 @@ pre.report-pre { white-space: pre-wrap; font-family: Consolas, monospace; font-s
   <div class="col-8 card">
     <div class="card-header">
       <span>Evidence-Backed Attack Graph</span>
-      <span style="font-size:0.75rem; color:var(--text-muted)">Validated relationships only</span>
+      <span style="font-size:0.75rem; color:var(--text-muted)">Click any node to inspect details</span>
     </div>
     <div class="graph-container">
       <svg id="attack-graph-svg" viewBox="0 0 700 300">
@@ -208,6 +262,17 @@ pre.report-pre { white-space: pre-wrap; font-family: Consolas, monospace; font-s
   </div>
 </div>
 
+<!-- Node Inspection Modal -->
+<div class="modal-overlay" id="node-modal" onclick="closeModal(event)">
+  <div class="modal-content" onclick="event.stopPropagation()">
+    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--panel-border); padding-bottom:0.5rem; margin-bottom:1rem;">
+      <h3 id="modal-title" style="color:var(--accent);">Host Details</h3>
+      <button onclick="document.getElementById('node-modal').style.display='none'" class="btn-sec" style="padding:0.2rem 0.5rem;">✕</button>
+    </div>
+    <div id="modal-body" style="font-size:0.85rem; line-height:1.6;"></div>
+  </div>
+</div>
+
 <script>
 let lastReportContent = "";
 
@@ -232,6 +297,14 @@ async function refreshData() {
     const gRes = await fetch('/api/graph');
     const gData = await gRes.json();
     renderGraph(gData);
+
+    const flagsRes = await fetch('/api/flags');
+    const flagsData = await flagsRes.json();
+    renderFlags(flagsData);
+
+    const agentsRes = await fetch('/api/agents');
+    const agentsData = await agentsRes.json();
+    renderAgents(agentsData);
 
     const repRes = await fetch('/api/report');
     const repData = await repRes.json();
@@ -260,6 +333,61 @@ function renderStatus(data) {
   document.getElementById('metric-assets').textContent = data.metrics.total_assets_discovered;
   document.getElementById('metric-services').textContent = `${data.metrics.total_services_discovered} open services identified`;
   document.getElementById('run-timer').textContent = `${data.metrics.runtime_seconds}s`;
+}
+
+function renderAgents(agents) {
+  if (!agents || !agents.length) return;
+  const strip = document.getElementById('agents-strip');
+  strip.innerHTML = agents.map(a => `
+    <div class="agent-card">
+      <div class="agent-name">${a.icon} ${a.name}</div>
+      <div class="agent-role">${a.role}</div>
+      <div class="agent-stat">${a.active} In Flight / ${a.completed} Done</div>
+    </div>
+  `).join('');
+}
+
+function renderFlags(flags) {
+  const caseBox = document.getElementById('trophy-case');
+  if (!flags || !flags.length) {
+    caseBox.style.display = 'none';
+    return;
+  }
+  caseBox.style.display = 'block';
+  document.getElementById('flag-count').textContent = flags.length;
+  const list = document.getElementById('flag-chips-list');
+  list.innerHTML = flags.map((f, idx) => {
+    const flagVal = f.excerpt.split(';').find(p => p.includes('flag='))?.split('=')[1] || f.summary;
+    return `
+      <div class="flag-chip">
+        <span>🚩 ${flagVal}</span>
+        <span class="flag-meta" title="${f.source}">📍 ${f.source || 'unknown source'}</span>
+        <span class="flag-meta">🕒 ${f.captured_at || '—'}</span>
+        <span class="flag-meta">${f.status || 'candidate'}</span>
+        <button class="btn-copy" data-flag="${flagVal}" id="copy-flag-${idx}">Copy Flag ⧉</button>
+      </div>
+    `;
+  }).join('');
+  // Bind copy handlers without inline string interpolation (safe against quotes)
+  list.querySelectorAll('.btn-copy[data-flag]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const val = btn.getAttribute('data-flag');
+      try {
+        await navigator.clipboard.writeText(val);
+        btn.textContent = '✓ Copied';
+      } catch (err) {
+        // Clipboard API unavailable — fallback via temporary textarea
+        const ta = document.createElement('textarea');
+        ta.value = val;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        btn.textContent = '✓ Copied';
+      }
+      setTimeout(() => { btn.textContent = 'Copy Flag ⧉'; }, 1500);
+    });
+  });
 }
 
 function renderLogs(logs) {
@@ -292,7 +420,7 @@ function renderFindings(findings) {
     return;
   }
   tbody.innerHTML = findings.map(f => {
-    const sevColor = f.severity === 'critical' ? 'var(--red)' : f.severity === 'high' ? 'var(--amber)' : 'var(--accent)';
+    const sevColor = f.severity === 'critical' ? 'var(--red)' : f.severity === 'high' ? 'var(--gold)' : 'var(--accent)';
     return `<tr>
       <td>${f.type}</td>
       <td style="color:${sevColor}; font-weight:700;">${f.severity.toUpperCase()}</td>
@@ -334,7 +462,7 @@ function renderGraph(graphData) {
     const isTarget = n.type === 'target';
     const isEntry = n.type === 'entry';
     const color = isTarget ? '#ef4444' : isEntry ? '#00f0ff' : '#10b981';
-    html += `<g transform="translate(${n.x},${n.y})">
+    html += `<g transform="translate(${n.x},${n.y})" style="cursor:pointer;" onclick="inspectNode('${n.id}')">
       <circle r="16" fill="#111827" stroke="${color}" stroke-width="3" />
       <text y="4" fill="#fff" font-size="10" font-weight="bold" text-anchor="middle">${n.label.slice(0,3)}</text>
       <text y="28" fill="#e5e7eb" font-size="10" font-family="monospace" text-anchor="middle">${n.label}</text>
@@ -344,6 +472,36 @@ function renderGraph(graphData) {
   svg.innerHTML = html;
 }
 
+async function inspectNode(assetId) {
+  try {
+    const res = await fetch(`/api/asset?id=${encodeURIComponent(assetId)}`);
+    const data = await res.json();
+    if (data.error) return;
+
+    document.getElementById('modal-title').textContent = `Target: ${data.canonical_key} (${data.type})`;
+    let body = `
+      <p><strong>Asset ID:</strong> <code>${data.asset_id}</code></p>
+      <p><strong>First Seen:</strong> ${data.first_seen}</p>
+      <h4 style="margin-top:1rem; color:var(--accent);">Open Services (${data.services.length})</h4>
+      <ul style="margin-left:1.2rem; margin-top:0.3rem;">
+        ${data.services.map(s => `<li><code>${s.port}/${s.protocol}</code> - ${s.name} ${s.version || ''}</li>`).join('') || '<li>None</li>'}
+      </ul>
+      <h4 style="margin-top:1rem; color:var(--gold);">Findings & Weaknesses (${data.findings.length})</h4>
+      <ul style="margin-left:1.2rem; margin-top:0.3rem;">
+        ${data.findings.map(f => `<li><strong>${f.severity.toUpperCase()}:</strong> ${f.type} - <em>${f.summary}</em></li>`).join('') || '<li>No direct weaknesses found on this host</li>'}
+      </ul>
+    `;
+    document.getElementById('modal-body').innerHTML = body;
+    document.getElementById('node-modal').style.display = 'flex';
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function closeModal(event) {
+  document.getElementById('node-modal').style.display = 'none';
+}
+
 function downloadReport() {
   if (!lastReportContent) return alert('No report available to download.');
   const blob = new Blob([lastReportContent], { type: 'text/markdown' });
@@ -351,6 +509,20 @@ function downloadReport() {
   a.href = URL.createObjectURL(blob);
   a.download = 'cart_assessment_report.md';
   a.click();
+}
+
+async function downloadPatches() {
+  try {
+    const res = await fetch('/api/patches');
+    const data = await res.json();
+    if (!data.patches || !data.patches.length) {
+      alert('No confirmed vulnerabilities require code patches yet.');
+      return;
+    }
+    alert(`Successfully generated ${data.patches.length} patch file(s) in reports/patches/!`);
+  } catch (err) {
+    alert('Error generating patches: ' + err);
+  }
 }
 
 // Initial fetch & 1-second auto-refresh
@@ -368,11 +540,10 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
     conn: sqlite3.Connection
     db_path: str
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
-        # Suppress noisy standard HTTP access logs in console
+    def log_message(self, format: str, *args: Any) -> None:
         pass
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
@@ -388,6 +559,14 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             self._handle_findings()
         elif path == "/api/graph":
             self._handle_graph()
+        elif path == "/api/flags":
+            self._handle_flags()
+        elif path == "/api/agents":
+            self._handle_agents()
+        elif path == "/api/asset":
+            self._handle_asset_detail(parsed.query)
+        elif path == "/api/patches":
+            self._handle_patches()
         elif path == "/api/logs":
             self._handle_logs()
         elif path == "/api/report":
@@ -449,6 +628,107 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             "metrics": report_data["metrics"],
         })
         conn.close()
+
+    def _handle_flags(self) -> None:
+        """Captured CTF flags — real records from the findings/evidence tables."""
+        conn = connect(self.db_path, check_same_thread=False)
+        rows = conn.execute(
+            "SELECT finding_id, asset_id, severity, status, summary "
+            "FROM findings WHERE finding_type = 'ctf_planted_flag' "
+            "ORDER BY rowid"
+        ).fetchall()
+        asset_keys = dict(
+            conn.execute("SELECT asset_id, canonical_key FROM assets").fetchall()
+        )
+        flags = []
+        for fid, aid, severity, status, summary in rows:
+            ev = conn.execute(
+                "SELECT artifact_path, excerpt, hash, timestamp "
+                "FROM evidence WHERE finding_id = ? LIMIT 1",
+                (fid,),
+            ).fetchone()
+            flags.append({
+                "finding_id": fid,
+                "asset_id": aid,
+                "asset_key": asset_keys.get(aid, aid),
+                "severity": severity,
+                "status": status,
+                "summary": summary,
+                "location": ev[0] if ev else "",
+                "excerpt": ev[1] if ev else "",
+                "hash": ev[2] if ev else "",
+                # Exact capture timestamp from the evidence record (UTC)
+                "captured_at": ev[3] if ev else "",
+                # Source: crawled page URL (web) or binary file path (binary)
+                "source": ev[0] if ev else "",
+            })
+        conn.close()
+        self._send_json(flags)
+
+    def _handle_agents(self) -> None:
+        conn = connect(self.db_path, check_same_thread=False)
+        agents = {
+            "network": {"name": "Network Specialist", "icon": "🌐", "role": "Host & Port Discovery", "active": 0, "completed": 0},
+            "web": {"name": "Web Specialist", "icon": "🕷️", "role": "Endpoints & Form Crawler", "active": 0, "completed": 0},
+            "binary": {"name": "Binary Specialist", "icon": "⚙️", "role": "Static Analysis & Unsafe Libc", "active": 0, "completed": 0},
+            "verifier": {"name": "Verification Service", "icon": "🛡️", "role": "Deterministic Playbooks", "active": 0, "completed": 0},
+            "advisor": {"name": "Remediation Advisor", "icon": "💡", "role": "Plain-English Patches", "active": 0, "completed": 0},
+        }
+
+        task_rows = conn.execute("SELECT owner, status, count(*) FROM tasks GROUP BY owner, status").fetchall()
+        for owner, status, count in task_rows:
+            if owner in agents:
+                if status == "running":
+                    agents[owner]["active"] += count
+                elif status == "succeeded":
+                    agents[owner]["completed"] += count
+
+        conf_count = conn.execute("SELECT count(*) FROM findings WHERE status = 'confirmed'").fetchone()[0]
+        cand_count = conn.execute("SELECT count(*) FROM findings WHERE status = 'candidate'").fetchone()[0]
+        agents["verifier"]["active"] = cand_count
+        agents["verifier"]["completed"] = conf_count
+        agents["advisor"]["completed"] = conf_count
+
+        conn.close()
+        self._send_json(list(agents.values()))
+
+    def _handle_asset_detail(self, query_str: str) -> None:
+        qs = urllib.parse.parse_qs(query_str)
+        asset_id = qs.get("id", [""])[0]
+        conn = connect(self.db_path, check_same_thread=False)
+        a_row = conn.execute(
+            "SELECT asset_id, canonical_key, asset_type, first_seen FROM assets WHERE asset_id = ?",
+            (asset_id,),
+        ).fetchone()
+        if not a_row:
+            conn.close()
+            self._send_json({"error": "not found"}, status=404)
+            return
+
+        svcs = conn.execute(
+            "SELECT port, protocol, service_name, version, state FROM services WHERE asset_id = ?",
+            (asset_id,),
+        ).fetchall()
+        findings = conn.execute(
+            "SELECT finding_id, finding_type, severity, status, summary FROM findings WHERE asset_id = ?",
+            (asset_id,),
+        ).fetchall()
+        conn.close()
+        self._send_json({
+            "asset_id": a_row[0],
+            "canonical_key": a_row[1],
+            "type": a_row[2],
+            "first_seen": a_row[3],
+            "services": [{"port": s[0], "protocol": s[1], "name": s[2], "version": s[3]} for s in svcs],
+            "findings": [{"id": f[0], "type": f[1], "severity": f[2], "status": f[3], "summary": f[4]} for f in findings],
+        })
+
+    def _handle_patches(self) -> None:
+        conn = connect(self.db_path, check_same_thread=False)
+        advisor = RemediationAdvisor(conn)
+        patches = advisor.export_patches()
+        conn.close()
+        self._send_json({"patches": patches})
 
     def _handle_candidates(self) -> None:
         candidates = list_candidate_networks()
@@ -516,16 +796,12 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         builder = AttackPathBuilder(conn, "current")
         paths = builder.build()
 
-        # Build visual nodes and edges with simple layout coordinates
         nodes_dict: dict[str, dict[str, Any]] = {}
         edges_list: list[dict[str, Any]] = []
 
-        # Coordinate generator across 700x300 viewBox
         x_start = 80
-        x_step = 160
         y_center = 150
 
-        # Collect all assets for canonical names
         asset_names = dict(conn.execute("SELECT asset_id, canonical_key FROM assets").fetchall())
 
         for p_idx, path in enumerate(paths):
@@ -599,4 +875,3 @@ def run_dashboard_server(
         webbrowser.open(url)
 
     return server
-

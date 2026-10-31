@@ -49,7 +49,7 @@ deterministic, stdlib-first and integrate with the existing task/finding graph:
    default 16 MiB), stored under `binary_cache/<run_id>/`, hashed (SHA-256) and
    registered with the gate for static analysis only. The orchestrator hook
    `on_binary_discovered` then auto-enqueues `binary_static_analysis`.
-4. **Remediation Advisor + tracing** — `advisor.py` (rule-based patches),
+4. **Remediation Advisor + tracing** — `advisor.py` (rule-based advisories + git-appliable `.patch` files via `export_patches()` for CONFIRMED findings, verified with `git apply --check`),
    `tracing.py` (spans to `traces/agent_traces.jsonl`, optional LangSmith).
 
 Scope-safety notes for feature 3: the destination URL is gate-allowed before
