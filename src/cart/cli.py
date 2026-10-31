@@ -30,8 +30,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "preflight":
         from .preflight import list_candidate_networks
 
-        candidates = list_candidate_networks()
-        print(candidates)
+        try:
+            candidates = list_candidate_networks()
+            print(candidates)
+        except NotImplementedError:
+            print(
+                "cart preflight: candidate network discovery is not yet implemented.\n"
+                "See TODO.md step 2 and docs/build-plan.md."
+            )
+            return 2
         return 0
 
     print(

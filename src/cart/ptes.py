@@ -21,7 +21,7 @@ class PtesPhase(StrEnum):
 
 
 # Mapping helper for the first release: engine activity -> canonical phase.
-DEFAULT_ACTTIVITY_PHASE: dict[str, PtesPhase] = {
+DEFAULT_ACTIVITY_PHASE: dict[str, PtesPhase] = {
     "candidate_network_discovery": PtesPhase.PRE_ENGAGEMENT,
     "host_discovery": PtesPhase.INTELLIGENCE_GATHERING,
     "port_service_discovery": PtesPhase.INTELLIGENCE_GATHERING,

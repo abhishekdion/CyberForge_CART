@@ -73,8 +73,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     ptes_phase TEXT NOT NULL DEFAULT '',
     parent_task_id TEXT,
     dedupe_key TEXT NOT NULL DEFAULT '',
-    budget TEXT NOT NULL DEFAULT '{}',  -- JSON object
-    UNIQUE(task_id, dedupe_key)
+    budget TEXT NOT NULL DEFAULT '{}'  -- JSON object
 );
 
 CREATE TABLE IF NOT EXISTS tool_events (
@@ -141,6 +140,8 @@ CREATE TABLE IF NOT EXISTS scope_decisions_log (
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status);
 CREATE INDEX IF NOT EXISTS idx_findings_asset ON findings(asset_id);
+-- Enforce one task per dedupe_key, but only for non-empty keys.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_dedupe ON tasks(dedupe_key) WHERE dedupe_key != '';
 """
 
 

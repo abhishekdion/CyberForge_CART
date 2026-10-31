@@ -45,12 +45,14 @@ class PolicyGate:
     def check_destination(self, target: str) -> ScopeDecisionResult:
         """Check one network destination (IP or CIDR) against the locked scope."""
         try:
-            addresses = list(ipaddress.ip_network(target, strict=False).hosts()) or []
+            net = ipaddress.ip_network(target, strict=False)
+            # .hosts() is empty for /32 and /128; fall back to the network address itself.
+            all_addrs: list = list(net.hosts()) or [net.network_address]
         except ValueError:
             return ScopeDecisionResult(
                 ScopeDecision.DENY, f"unparseable destination: {target!r}", target
             )
-        for addr in addresses or [ipaddress.ip_address(target.split("/")[0])]:
+        for addr in all_addrs:
             result = self.check_ip(addr)
             if result.decision is ScopeDecision.DENY:
                 return result

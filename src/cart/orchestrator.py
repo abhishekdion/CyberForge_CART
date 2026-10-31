@@ -27,7 +27,9 @@ class Orchestrator:
         return task.task_id
 
     def ready_tasks(self, max_n: int | None = None) -> list[Task]:
-        return [t for t in self.tasks.values() if t.status is TaskStatus.PENDING][: max_n or 0] or []
+        # Filter for READY (not PENDING) — tasks move PENDING -> READY before scheduling.
+        ready = [t for t in self.tasks.values() if t.status is TaskStatus.READY]
+        return ready[:max_n]  # slice with None means no limit
 
     def transition(self, task_id: str, new_status: TaskStatus) -> None:
         task = self.tasks.get(task_id)
